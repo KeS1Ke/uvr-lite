@@ -81,7 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_ls = sub.add_parser("models", help="列出可用模型与下载状态")
     p_ls.set_defaults(func=_cmd_models)
 
+    p_ui = sub.add_parser("ui", help="启动桌面界面（需 pip install -e '.[ui]'）")
+    p_ui.set_defaults(func=_cmd_ui)
+
     return parser
+
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    try:
+        from .ui.main import run
+    except ImportError:
+        print("[ERROR] 桌面界面依赖未安装，请先运行: pip install -e '.[ui]'")
+        return 1
+    return run()
 
 
 def main(argv=None) -> int:
