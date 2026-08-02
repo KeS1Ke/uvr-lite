@@ -75,6 +75,26 @@ def test_copy_app_source_missing_item_skipped(tmp_path):
     assert dest.exists()
 
 
+def test_copy_app_source_keeps_msst_models_code(tmp_path):
+    """msst/models/ 是模型定义代码，必须复制（仅排除仓库根权重目录 models/）。"""
+    src = tmp_path / "src"
+    (src / "msst" / "models" / "bs_roformer").mkdir(parents=True)
+    (src / "msst" / "models" / "bs_roformer" / "model.py").write_text("x")
+    (src / "msst" / "utils").mkdir()
+    (src / "msst" / "utils" / "audio_utils.py").write_text("y")
+    (src / "msst" / "inference.py").write_text("z")
+    (src / "uvr_lite").mkdir()
+    (src / "uvr_lite" / "engine.py").write_text("w")
+    (src / "models").mkdir()  # 仓库根权重目录（应排除）
+    (src / "models" / "model.ckpt").write_bytes(b"big")
+    dest = tmp_path / "dest" / "app"
+    copy_app_source(src, dest)
+
+    assert (dest / "msst" / "models" / "bs_roformer" / "model.py").exists()
+    assert (dest / "msst" / "utils" / "audio_utils.py").exists()
+    assert not (dest / "models").exists()  # 仓库根权重目录仍排除
+
+
 def test_include_list_has_required_entries():
     assert "uvr_lite" in _INCLUDE
     assert "pyproject.toml" in _INCLUDE

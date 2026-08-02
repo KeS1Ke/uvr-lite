@@ -110,7 +110,7 @@ def test_install_deps_gpu_torch_then_pip(tmp_path, monkeypatch):
     assert pip_cmds[0][0][0] == str(downloaded["dest"])
     assert pip_cmds[0][1][0] == steps.PIP_INDEX
     assert percents and percents[-1] == 100  # 下载回调到 70，最后整体 100
-    assert pip_cmds[1][0] == [f"{ctx.app_dir}[ui]"]  # 第二段：app 依赖
+    assert pip_cmds[1][0] == ["-e", f"{ctx.app_dir}[ui]"]  # 第二段：app 依赖（editable）
     assert pip_cmds[1][1][0] == steps.PIP_INDEX
 
 
@@ -137,7 +137,7 @@ def test_install_deps_cpu_no_torch_skip(tmp_path, monkeypatch):
     monkeypatch.setattr(steps.copy_app, "copy_app_source", lambda src, dest: 1)
     steps.step_install_deps(ctx)
     assert len(pip_specs) == 1
-    assert pip_specs[0][0][0] == f"{ctx.app_dir}[ui]"  # 只有 app 依赖，无 torch
+    assert pip_specs[0][0] == ["-e", f"{ctx.app_dir}[ui]"]  # 只有 app 依赖（editable），无 torch
 
 
 def test_pip_fallback_all_sources_fail(tmp_path, monkeypatch):

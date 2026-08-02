@@ -197,14 +197,15 @@ def step_install_deps(ctx: StepContext) -> None:
         ctx.message("PyTorch 已安装，跳过")
     ctx.percent(40)
 
-    # 复制代码快照 → pip install app[ui]（清华源，失败回退官方）
+    # 复制代码快照 → pip install -e app[ui]（editable：uvr_lite 直接引用 app/，
+    # engine.py 才能按 __file__ 定位到 app/msst；非 editable 会装进 site-packages 导致 msst 路径断裂）
     if ctx.cancel():
         raise InterruptedError("安装已取消")
     src = ctx.src_dir or _REPO_ROOT
     ctx.message("正在复制程序文件…")
     copy_app.copy_app_source(src, ctx.app_dir)
     ctx.message("正在安装 uvr-lite 与依赖（界面库、音频库等）…")
-    _pip_install_with_fallback(ctx, [f"{ctx.app_dir}[ui]"], [PIP_INDEX, ""])
+    _pip_install_with_fallback(ctx, ["-e", f"{ctx.app_dir}[ui]"], [PIP_INDEX, ""])
     ctx.message("依赖安装完成")
     ctx.percent(100)
 
