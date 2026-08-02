@@ -6,10 +6,11 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QSettings, Qt, QThread, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -31,8 +33,12 @@ from PySide6.QtWidgets import (
 
 from ..models import MODEL_REGISTRY
 from .files import AUDIO_EXTS, dedup_paths, is_audio, scan_audio_files
+from .progress import estimate_eta, summary_text
+from .worker import SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
+
+PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
 
 MODEL_LABELS = {
     "bs_roformer_ep317": "BS-RoFormer ep317（主力，推荐）",
@@ -118,17 +124,17 @@ class MainWindow(QMainWindow):
         root.addWidget(out_box)
         self.btn_out.clicked.connect(self._choose_out_dir)
 
-        # --- 操作区（票 3 接线推理）---
+        # --- 操作区 ---
         action_row = QHBoxLayout()
         self.btn_start = QPushButton("开始分离", central)
-        self.btn_start.setEnabled(False)
-        self.btn_start.setToolTip("推理接线在下一版本启用")
         self.btn_cancel = QPushButton("取消", central)
         self.btn_cancel.setEnabled(False)
         action_row.addWidget(self.btn_start)
         action_row.addWidget(self.btn_cancel)
         action_row.addStretch(1)
         root.addLayout(action_row)
+        self.btn_start.clicked.connect(self._start_clicked)
+        self.btn_cancel.clicked.connect(self._cancel_clicked)
 
         self.progress = QProgressBarWrap(central)
         self.progress.setEnabled(False)
@@ -233,10 +239,112 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    # ---------- 任务控制 ----------
+
+    def _start_clicked(self) -> None:
+        if not self._paths:
+            QMessageBox.information(self, "提示", "请先添加音频文件（选择文件/文件夹或拖拽）。")
+            return
+        out_dir = self.edit_out.text().strip() or str(Path.cwd() / "output")
+        out_dir = str(Path(out_dir).resolve())
+        self._save_settings()
+
+        params = {
+            "model_name": self.combo_model.currentData(),
+            "device": self.combo_device.currentText(),
+            "fmt": self.combo_format.currentText(),
+            "pcm": f"PCM_{self.combo_pcm.currentText()}",
+            "bigshifts": self.spin_bigshifts.value(),
+            "batch_size": self.spin_batch.value() or None,
+            "tta": self.check_tta.isChecked(),
+        }
+        self._worker = SeparationWorker(list(self._paths), out_dir, params)
+        self._thread = QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.file_done.connect(self._on_file_done)
+        self._worker.file_failed.connect(self._on_file_failed)
+        self._worker.all_finished.connect(self._on_all_finished)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._worker.deleteLater)
+
+        self._out_dir = out_dir
+        self._t_start = time.time()
+        self._t_file = time.time()
+        self._file_times: list[float] = []
+        self._failed_names: list[str] = []
+        self._ok_count = 0
+        self._set_busy(True)
+        self.progress.bar.setValue(0)
+        self.label_status.setText("准备中…")
+        self._thread.start()
+
+    def _cancel_clicked(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            self.btn_cancel.setEnabled(False)
+            self.label_status.setText("正在取消…")
+
+    def _on_progress(self, phase, done, total, file_idx, file_total, file_pct) -> None:
+        global_pct = int((file_idx + file_pct / 100.0) / max(1, file_total) * 100)
+        self.progress.bar.setValue(global_pct)
+        eta = estimate_eta(self._file_times, file_idx, file_total, file_pct / 100.0)
+        eta_txt = self._fmt_eta(eta) if eta is not None else "计算中…"
+        self.label_status.setText(
+            f"处理中 {file_idx + 1}/{file_total} · {PHASE_CN.get(phase, phase)} {file_pct}% · 预计剩余 {eta_txt}"
+        )
+
+    def _on_file_done(self, file_idx, written) -> None:
+        self._file_times.append(time.time() - self._t_file)
+        self._t_file = time.time()
+        self._ok_count += 1
+
+    def _on_file_failed(self, file_idx, error) -> None:
+        name = self._paths[file_idx].name
+        self._failed_names.append(name)
+        self.label_status.setText(f"{name} 处理失败，已跳过（{error[:80]}）")
+
+    def _on_all_finished(self, ok, failed, cancelled) -> None:
+        self._set_busy(False)
+        msg = summary_text(ok, self._failed_names)
+        if cancelled:
+            msg = f"已取消。{msg}"
+        box = QMessageBox(self)
+        box.setWindowTitle("分离完成" if not cancelled else "已取消")
+        box.setText(msg)
+        box.setIcon(QMessageBox.Information if not failed else QMessageBox.Warning)
+        btn_open = box.addButton("打开输出文件夹", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() is btn_open:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._out_dir))
+        self.label_status.setText("就绪。")
+
+    @staticmethod
+    def _fmt_eta(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        return f"{m} 分 {s} 秒" if m else f"{s} 秒"
+
+    def _set_busy(self, busy: bool) -> None:
+        for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
+                  self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
+                  self.spin_bigshifts, self.spin_batch, self.check_tta,
+                  self.edit_out, self.btn_out):
+            w.setEnabled(not busy)
+        self.btn_start.setEnabled(not busy)
+        self.btn_cancel.setEnabled(busy)
+        self.progress.setEnabled(busy)
+        self.list_files.setEnabled(not busy)
+
     # ---------- 生命周期 ----------
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_settings()
+        if getattr(self, "_worker", None) is not None and self._thread.isRunning():
+            self._worker.cancel()
+            self._thread.quit()
+            self._thread.wait(5000)
         super().closeEvent(event)
 
 
