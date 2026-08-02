@@ -1,39 +1,41 @@
 # uvr-lite
 
+**English** | [简体中文](README.zh-CN.md)
+
 ![version](https://img.shields.io/badge/version-0.1.0-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 
-**轻量级人声 / 伴奏分离命令行工具** —— 一个模型文件（约 640 MB），一条命令，输出两个无损音轨。
+**A lightweight vocal / instrumental separation CLI** — one model file (~640 MB), one command, two lossless stems.
 
 ```bash
-uvr-lite separate 歌曲.flac -o output
-# → output/歌曲-vocals.flac        （人声轨）
-# → output/歌曲-instrumental.flac  （伴奏轨，= 原曲 − 人声，数学无损）
+uvr-lite separate song.flac -o output
+# → output/song-vocals.flac        (vocal stem)
+# → output/song-instrumental.flac  (instrumental stem, = mix − vocals, mathematically lossless)
 ```
 
-## 演示
+## Demo
 
-下图为一段 **MiMo TTS 合成人声 + 合成器伴奏** 混合音频的分离效果（对数频谱，冷色低能量 → 暖色高能量）：
+Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequency spectrograms, cold → warm colormap):
 
 ![demo](docs/images/demo-spectrograms.png)
 
-- **中间（人声轨）**：平滑的谐波横纹随旋律起伏 —— 歌声被完整提取
-- **右侧（伴奏轨）**：低频能量带 + 打击乐瞬态 —— 节奏部分被完整保留
+- **Middle (vocals)**: smooth harmonic ridges following the melody — the singing voice is fully extracted
+- **Right (instrumental)**: low-frequency energy band + percussive transients — the rhythm section is preserved
 
-## 特性
+## Features
 
-- **一键部署**：`install.bat`（Windows）/ `install.sh`（Linux/macOS）自动完成 venv + 依赖 + torch（CPU/CUDA 自动分流）+ 模型下载（SHA256 校验）+ 冒烟测试
-- **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（约 3 分钟）约 **51 秒**
-- **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
-- **无 GUI、无训练代码**：仅推理，仓库代码 < 1 MB
-- 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
+- **One-click install**: `install.bat` (Windows) / `install.sh` (Linux/macOS) — venv + dependencies + torch (CPU/CUDA auto-detection) + model download (SHA256 verified) + smoke test
+- **Primary model**: BS-RoFormer ep317 (trained by viperx, SDR ≈ 10.9–12.9 dB) — a full track (~3 min) takes about **51 s** on an RTX 4060
+- **Lossless output**: FLAC (16/24 bit) or WAV, original 44.1 kHz sample rate preserved
+- **No GUI, no training code**: inference only, repo code < 1 MB
+- Optional second model: `mel_band_karaoke` (Mel-Band RoFormer Karaoke, trained by aufr33 & viperx)
 
-## 快速开始
+## Quick Start
 
-### 一键安装
+### One-click install
 
 **Windows**
 
@@ -47,86 +49,86 @@ install.bat
 bash install.sh
 ```
 
-脚本自动完成：创建虚拟环境 `.venv` → 检测 NVIDIA 显卡（有卡装 CUDA 版 torch / 无卡装 CPU 版）→ 安装依赖 → 下载模型权重（约 640 MB，SHA256 校验）→ （GPU 环境）冒烟测试。
+The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUDA build of torch, or CPU build otherwise) → installs dependencies → downloads the model (~640 MB, SHA256 verified) → runs a smoke test on GPU setups.
 
-### 手动安装
+### Manual install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e .
-uvr-lite download                                    # 下载模型（约 640 MB）
+uvr-lite download                                    # download the model (~640 MB)
 ```
 
-## 用法
+## Usage
 
 ```bash
-# 单文件
+# Single file
 uvr-lite separate song.mp3 -o output
 
-# 多文件 / 指定格式与位深
+# Multiple files / explicit format & bit depth
 uvr-lite separate a.flac b.wav -o out --format flac --pcm 24
 
-# 其他模型（备选）
+# Alternative model
 uvr-lite separate song.flac -m mel_band_karaoke
 
-# 查看模型状态 / 强制重下
+# List models / force re-download
 uvr-lite models
 uvr-lite download --force
 ```
 
-| 参数 | 说明 |
+| Option | Description |
 |---|---|
-| `-m, --model` | `bs_roformer_ep317`（默认）/ `mel_band_karaoke` |
-| `--format` | `auto`（按峰值自动选 flac/wav，默认）/ `flac` / `wav` |
-| `--pcm` | FLAC 位深 `16` / `24`（默认） |
-| `--device` | `auto`（默认）/ `cpu` / `cuda` / `mps` |
-| `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
-| `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
+| `-m, --model` | `bs_roformer_ep317` (default) / `mel_band_karaoke` |
+| `--format` | `auto` (flac/wav chosen by peak level, default) / `flac` / `wav` |
+| `--pcm` | FLAC bit depth `16` / `24` (default) |
+| `--device` | `auto` (default) / `cpu` / `cuda` / `mps` |
+| `--bigshifts N` | Number of circular time-shift passes; >1 improves quality at linear cost (default 1) |
+| `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
 
-## 工作原理
+## How It Works
 
 ```
-输入音频 → librosa 解码 (44.1kHz) → （可选归一化）
-       → BigShifts 圆形时移平均 → BS-RoFormer 前向（vocals 掩码）
-       → instrumental = 原混合 − vocals（数学无损）
-       → soundfile 写 FLAC/WAV
+input audio → librosa decode (44.1 kHz) → (optional normalization)
+            → BigShifts circular time-shift averaging → BS-RoFormer forward (vocals mask)
+            → instrumental = mix − vocals (mathematically lossless)
+            → soundfile writes FLAC/WAV
 ```
 
-- **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
-- **模型**：`.ckpt` 权重托管于 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)（UVR 官方模型仓库），SHA256 完整性校验，不入 git
-- **代码结构**
+- **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
+- **Model**: `.ckpt` weights are hosted on [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) (the official UVR model repository), SHA256-verified, kept out of git
+- **Layout**
 
 ```
 uvr-lite/
-├── uvr_lite/          # CLI 包：separate / download / models 命令
-│   ├── engine.py      #   分离引擎（bigshifts 平均、instrumental 数学无损）
-│   ├── models.py      #   模型注册表（URL + SHA256）
-│   ├── download.py    #   流式下载 + 完整性校验
-│   └── configs/       #   模型配置 yaml
-├── msst/              # vendored 推理引擎（ZFTurbo MSST 裁剪子集，MIT）
-├── install.bat|sh     # 一键安装脚本
-└── scripts/           # 可选配套：analyze（DSP 分析）/ compose（算法作曲）/ render_spectro（频谱图）
+├── uvr_lite/          # CLI package: separate / download / models commands
+│   ├── engine.py      #   separation engine (bigshifts averaging, lossless instrumental)
+│   ├── models.py      #   model registry (URL + SHA256)
+│   ├── download.py    #   streaming download + integrity check
+│   └── configs/       #   model config yaml files
+├── msst/              # vendored inference engine (ZFTurbo MSST subset, MIT)
+├── install.bat|sh     # one-click installers
+└── scripts/           # optional extras: analyze (DSP) / compose (procedural) / render_spectro (spectrograms)
 ```
 
-### 可选配套脚本
+### Optional companion scripts
 
-`scripts/` 下提供三个纯 numpy 工具（独立于分离核心，仅 numpy/Pillow 依赖）：
+`scripts/` provides three pure-numpy tools (independent of the separation core, numpy/Pillow only):
 
-- `scripts/analyze.py`：DSP 原曲分析（BPM/调性/和弦/结构/音色统计），输出 Markdown 报告
-- `scripts/compose.py`：算法作曲引擎（可复现的旋律 + 编曲合成）
-- `scripts/render_spectro.py`：对数频谱图渲染（PNG，本仓库演示图即由此生成）
+- `scripts/analyze.py` — DSP track analysis (BPM / key / chords / structure / timbre stats) → Markdown report
+- `scripts/compose.py` — procedural music engine (reproducible melody + arrangement synthesis)
+- `scripts/render_spectro.py` — log-frequency spectrogram rendering (PNG; the demo image above was generated by it)
 
-## 致谢（Reference）
+## Credits
 
-本项目是独立仓库（非 fork），代码主体为自研 CLI 封装 + ZFTurbo MSST 推理子集，模型与 **Ultimate Vocal Remover** 生态同源。感谢：
+This is an independent repository (not a fork): the code is our own CLI wrapper plus a ZFTurbo MSST inference subset; the models share the **Ultimate Vocal Remover** ecosystem. Thanks to:
 
-- **[Ultimate Vocal Remover GUI](https://github.com/Anjok07/ultimatevocalremovergui)**（Anjok07/aufr33，MIT）—— 人声分离领域标杆项目，本项目的模型生态与设计理念均受其启发
-- **[ZFTurbo / Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)**（MIT）—— 推理引擎与模型训练框架来源，`msst/` 目录为其裁剪子集
-- **viperx / aufr33** —— BS-RoFormer 与 Mel-Band RoFormer 模型训练者
-- **[TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)** —— 模型权重托管仓库
+- **[Ultimate Vocal Remover GUI](https://github.com/Anjok07/ultimatevocalremovergui)** (Anjok07/aufr33, MIT) — the reference project in vocal separation; our model ecosystem and design are inspired by it
+- **[ZFTurbo / Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)** (MIT) — source of the inference engine and training framework; `msst/` is a trimmed subset
+- **viperx / aufr33** — trainers of the BS-RoFormer and Mel-Band RoFormer models
+- **[TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)** — model weight hosting
 
-按照 MIT 许可要求：使用上述模型的第三方项目须保留对 UVR 及其开发者的署名。
+Per the MIT license: third-party projects using these models must credit UVR and its developers.
 
-## 许可
+## License
 
-MIT License。详见 [LICENSE](LICENSE)。`msst/` 子目录保留 ZFTurbo MSST 的原始版权声明。
+MIT License — see [LICENSE](LICENSE). The `msst/` subdirectory retains the original ZFTurbo MSST copyright notice.
