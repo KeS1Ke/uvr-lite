@@ -34,6 +34,9 @@ class SeparationWorker(QObject):
         total = len(self.files)
         for idx, f in enumerate(self.files):
             self._cur_idx = idx
+            # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从 50% 起算、
+            # infer 回调再把进度打回（进度条回跳）
+            self._tracker = ProgressTracker(self.params.get("bigshifts", 1))
             if self._cancel:
                 break
             try:
