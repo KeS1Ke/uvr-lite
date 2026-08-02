@@ -16,9 +16,16 @@ def bigshifts_wrapper(
     device: torch.device,
     model_type: str,
     pbar: bool = False,
-    bigshifts: int = 1
+    bigshifts: int = 1,
+    progress_cb=None,
+    demix_progress_cb=None
 ) -> Union[Dict[str, np.ndarray], np.ndarray]:
-    """BigShifts wrapper for inference-time demixing."""
+    """BigShifts wrapper for inference-time demixing.
+
+    progress_cb(done, total): called once per BigShifts pass (1-based done).
+    demix_progress_cb(done, total): forwarded to demix for chunk-level progress.
+    Both may raise to abort.
+    """
 
     should_print = not dist.is_initialized() or dist.get_rank() == 0
 
@@ -37,9 +44,10 @@ def bigshifts_wrapper(
     else:
         shifts_iterator = shifts
 
-    for shift in shifts_iterator:
+    for pass_idx, shift in enumerate(shifts_iterator):
         shifted_mix = np.concatenate((mix[:, -shift:], mix[:, :-shift]), axis=-1)
-        sources = demix(config, model, shifted_mix, device, model_type, pbar)
+        sources = demix(config, model, shifted_mix, device, model_type, pbar,
+                        progress_cb=demix_progress_cb)
 
         if isinstance(sources, dict):
             unshifted = {
@@ -52,6 +60,9 @@ def bigshifts_wrapper(
             results.append(unshifted)
         else:
             raise ValueError("Unsupported return type from demix")
+
+        if progress_cb is not None:
+            progress_cb(pass_idx + 1, bigshifts)
 
     if isinstance(results[0], dict):
         avg_result = {}
@@ -67,7 +78,8 @@ def demix(
     mix: torch.Tensor,
     device: torch.device,
     model_type: str,
-    pbar: bool = False
+    pbar: bool = False,
+    progress_cb=None
 ) -> Union[Dict[str, np.ndarray], np.ndarray]:
     """
     Perform audio source separation with a given model.
@@ -86,6 +98,8 @@ def demix(
             determines processing mode.
         pbar (bool, optional): If True, show a progress bar during chunk
             processing. Defaults to False.
+        progress_cb (callable, optional): Called as progress_cb(done, total)
+            after each processed chunk; may raise to abort inference.
 
     Returns:
         Union[Dict[str, np.ndarray], np.ndarray]:
@@ -187,6 +201,9 @@ def demix(
                 if progress_bar:
                     progress_bar.update(step)
 
+                if progress_cb is not None:
+                    progress_cb(min(i, mix.shape[1]), mix.shape[1])
+
             if progress_bar:
                 progress_bar.close()
 
@@ -222,7 +239,8 @@ def apply_tta(
     device: torch.device,
     model_type: str,
     bigshifts: int = 1,
-    pbar: bool = False
+    pbar: bool = False,
+    progress_cb=None
 ) -> Union[dict[str, np.ndarray], np.ndarray]:
     """
     Enhance source separation results using Test-Time Augmentation (TTA).
@@ -263,6 +281,9 @@ def apply_tta(
                 waveforms_orig[el] += waveforms[el][::-1].copy()
             else:
                 waveforms_orig[el] -= waveforms[el]
+
+        if progress_cb is not None:
+            progress_cb(i + 1, len(track_proc_list))
 
     # Average the results across augmentations
     for el in waveforms_orig:

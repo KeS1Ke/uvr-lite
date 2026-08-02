@@ -8,7 +8,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import librosa
 import numpy as np
@@ -32,6 +32,10 @@ from utils.settings import get_model_from_config  # noqa: E402
 
 from .download import config_path, ensure_model  # noqa: E402
 from .models import DEFAULT_MODEL, get_model_info  # noqa: E402
+
+
+class CancelledError(Exception):
+    """用户请求取消当前分离任务（进度回调返回 False 时抛出）。"""
 
 
 def pick_device(device: str) -> str:
@@ -77,13 +81,25 @@ def separate_file(
     tta: bool = False,
     batch_size: Optional[int] = None,
     verbose: bool = True,
+    progress_callback: Optional[Callable[[str, int, int], bool]] = None,
 ) -> List[Path]:
-    """分离单个音频文件，输出 {stem}-vocals 与 {stem}-instrumental 两个文件。"""
+    """分离单个音频文件，输出 {stem}-vocals 与 {stem}-instrumental 两个文件。
+
+    progress_callback(phase, done, total) -> bool：
+      phase 为 "decode" / "infer" / "chunk" / "tta" / "write"；
+      返回 False 表示请求取消，引擎抛 CancelledError 并清理已写出的半成品。
+      不传（CLI 路径）时行为与旧版完全一致。
+    """
     input_path = Path(input_path)
     if not input_path.exists():
         raise FileNotFoundError(f"输入文件不存在: {input_path}")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cb(phase: str, done: int, total: int) -> None:
+        """上报进度；用户回调返回 False（取消请求）时抛 CancelledError。"""
+        if progress_callback is not None and not progress_callback(phase, done, total):
+            raise CancelledError(f"用户在 {phase} 阶段取消了任务")
 
     device = pick_device(device)
     ckpt = ensure_model(model_name)
@@ -97,11 +113,13 @@ def separate_file(
     if verbose:
         print(f"分离: {input_path.name} | 模型: {model_name} | 设备: {device} | 采样率: {sample_rate}")
 
+    _cb("decode", 0, 1)
     mix, sr = librosa.load(input_path, sr=sample_rate, mono=False)
     if len(mix.shape) == 1:
         mix = np.expand_dims(mix, axis=0)
         if getattr(config.audio, "num_channels", 1) == 2:
             mix = np.concatenate([mix, mix], axis=0)
+    _cb("decode", 1, 1)
 
     mix_orig = mix.copy()
 
@@ -113,11 +131,14 @@ def separate_file(
     waveforms = bigshifts_wrapper(
         config, model, mix, device,
         model_type=model_type, pbar=verbose, bigshifts=bigshifts,
+        progress_cb=lambda done, total: _cb("infer", done, total),
+        demix_progress_cb=lambda done, total: _cb("chunk", done, total),
     )
     if tta:
         waveforms = apply_tta(
             config, model, mix, waveforms, device,
             model_type, bigshifts=bigshifts, pbar=verbose,
+            progress_cb=lambda done, total: _cb("tta", done, total),
         )
 
     # instrumental = 原混合 - 目标声部（数学无损）
@@ -126,23 +147,35 @@ def separate_file(
     target_key = next(i for i in instruments if i.lower() == target)
     waveforms["instrumental"] = mix_orig - waveforms[target_key]
 
-    written = []
-    for instr_key, stem_name in [(target_key, target), ("instrumental", "instrumental")]:
-        est = waveforms[instr_key]
-        if norm_params is not None:
-            est = denormalize_audio(est, norm_params)
+    written: List[Path] = []
+    try:
+        for idx, (instr_key, stem_name) in enumerate(
+            [(target_key, target), ("instrumental", "instrumental")], start=1
+        ):
+            est = waveforms[instr_key]
+            if norm_params is not None:
+                est = denormalize_audio(est, norm_params)
 
-        peak = float(np.abs(est).max())
-        if fmt == "flac" or (fmt == "auto" and peak <= 1.0):
-            codec = "flac"
-        else:
-            codec = "wav"
+            peak = float(np.abs(est).max())
+            if fmt == "flac" or (fmt == "auto" and peak <= 1.0):
+                codec = "flac"
+            else:
+                codec = "wav"
 
-        out_path = out_dir / f"{input_path.stem}-{stem_name}.{codec}"
-        sf.write(out_path, est.T, sample_rate, subtype=pcm)
-        if verbose:
-            print(f"  写出: {out_path}（峰值 {peak:.3f}）")
-        written.append(out_path)
+            out_path = out_dir / f"{input_path.stem}-{stem_name}.{codec}"
+            sf.write(out_path, est.T, sample_rate, subtype=pcm)
+            if verbose:
+                print(f"  写出: {out_path}（峰值 {peak:.3f}）")
+            written.append(out_path)
+            _cb("write", idx, 2)
+    except CancelledError:
+        # 取消：清理已写出的半成品，不留残缺文件
+        for p in written:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     return written
 
 
