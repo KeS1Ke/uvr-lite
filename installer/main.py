@@ -9,6 +9,7 @@
 票 6 填充真实执行链。
 """
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -33,6 +34,12 @@ _ICON = Path(__file__).resolve().parent.parent / "uvr_lite" / "ui" / "resources"
 DEFAULT_DIR = Path.home() / "uvr-lite"
 
 PAGE_WELCOME, PAGE_DIR, PAGE_RUN, PAGE_DONE = 0, 1, 2, 3
+
+
+def _set_app_user_model_id(app_id: str) -> None:
+    """Windows 任务栏图标跟随窗口图标（否则显示 Python 默认图标）。"""
+    if sys.platform == "win32":
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
 
 
 class InstallerWindow(QDialog):
@@ -121,6 +128,23 @@ class InstallerWindow(QDialog):
         lay.addWidget(self.label_run_title)
         lay.addWidget(self.label_run_status)
         lay.addWidget(self.progress)
+
+        # 页内取消确认（不弹独立窗口）
+        self.confirm_row = QWidget(page)
+        self.confirm_row.setVisible(False)
+        self.confirm_row.setStyleSheet(
+            "QWidget { background: #FFF8DC; border: 1px solid #E6C300; border-radius: 4px; }")
+        cr = QHBoxLayout(self.confirm_row)
+        cr.setContentsMargins(8, 6, 8, 6)
+        cr.addWidget(QLabel("确定取消安装吗？已下载的部分会保留，下次可继续。"))
+        self.btn_confirm_cancel = QPushButton("确认取消")
+        self.btn_continue = QPushButton("继续安装")
+        cr.addWidget(self.btn_confirm_cancel)
+        cr.addWidget(self.btn_continue)
+        lay.addWidget(self.confirm_row)
+        self.btn_confirm_cancel.clicked.connect(self._confirm_cancel)
+        self.btn_continue.clicked.connect(self._dismiss_confirm)
+
         lay.addStretch(1)
         self.stack.addWidget(page)
 
@@ -159,14 +183,21 @@ class InstallerWindow(QDialog):
 
     def _on_cancel(self) -> None:
         if self.stack.currentIndex() == PAGE_RUN and self._runner is not None:
-            ret = QMessageBox.question(
-                self, "取消安装", "确定取消安装吗？已下载的部分会保留，下次可继续。")
-            if ret != QMessageBox.Yes:
-                return
-            self._runner.cancel()
+            # 页内确认，不弹独立窗口
+            self.confirm_row.setVisible(True)
             self.btn_cancel.setEnabled(False)
             return
         self.reject()
+
+    def _confirm_cancel(self) -> None:
+        self.confirm_row.setVisible(False)
+        if self._runner is not None:
+            self._runner.cancel()
+            self.label_run_status.setText("正在取消…")
+
+    def _dismiss_confirm(self) -> None:
+        self.confirm_row.setVisible(False)
+        self.btn_cancel.setEnabled(True)
 
     # ---------- 目录页 ----------
 
@@ -237,6 +268,7 @@ class InstallerWindow(QDialog):
 
 def uninstall() -> int:
     """卸载：确认后删除安装目录与两处快捷方式。"""
+    _set_app_user_model_id("uvr-lite.uninstaller")
     app = QApplication(sys.argv)
     app.setApplicationName("uvr-lite-installer")
     app.setWindowIcon(QIcon(str(_ICON)))
@@ -281,6 +313,7 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--uninstall" in argv:
         return uninstall()
+    _set_app_user_model_id("uvr-lite.installer")
     app = QApplication(sys.argv)
     app.setApplicationName("uvr-lite-installer")
     app.setWindowIcon(QIcon(str(_ICON)))

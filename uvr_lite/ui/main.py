@@ -458,6 +458,11 @@ class QProgressBarWrap(QWidget):
 
 
 def run() -> int:
+    # Windows 任务栏图标跟随窗口图标（否则显示 Python 默认图标）
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("uvr-lite")
     app = QApplication(sys.argv)
     app.setApplicationName("uvr-lite")
     app.setWindowIcon(QIcon(str(_ICON)))
