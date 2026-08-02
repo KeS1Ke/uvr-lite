@@ -36,7 +36,8 @@ dependencies = [
 uvr-lite = "uvr_lite.cli:main"
 
 [tool.setuptools]
-packages = ["uvr_lite"]
+packages = ["uvr_lite", "uvr_lite.ui"]
 
 [tool.setuptools.package-data]
 uvr_lite = ["configs/*.yaml"]
+"uvr_lite.ui" = ["resources/*"]
