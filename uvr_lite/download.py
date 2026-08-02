@@ -9,6 +9,7 @@
 
 import hashlib
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -56,7 +57,11 @@ def _download_one(url: str, tmp: Path,
 
     progress_callback(done_bytes, total_bytes) -> bool：返回 False 视为用户
     取消，抛 InterruptedError（保留 .part 供下次续传）。
+
+    设置 socket 默认超时：服务器断流后 TCP 半开连接时，
+    read 不会永远阻塞（否则安装器会无限卡死）。
     """
+    socket.setdefaulttimeout(60)
     existing = tmp.stat().st_size if tmp.exists() else 0
     headers = {"User-Agent": UA}
     if existing:
@@ -87,8 +92,10 @@ def _download_one(url: str, tmp: Path,
 
 
 def _download(urls: List[str], dest: Path,
-              progress_callback: Optional[Callable[[int, int], bool]] = None) -> None:
-    """按顺序尝试各下载源，全部失败才报错；完成后原子改名。
+              progress_callback: Optional[Callable[[int, int], bool]] = None,
+              retries: int = 2) -> None:
+    """按顺序尝试各下载源（每源最多重试 retries 次，断点续传），
+    全部失败才报错；完成后原子改名。
 
     用户取消（InterruptedError）不切换源、保留 .part 供续传。
     """
@@ -96,14 +103,15 @@ def _download(urls: List[str], dest: Path,
     tmp = dest.with_suffix(dest.suffix + ".part")
     errors = []
     for url in urls:
-        try:
-            _download_one(url, tmp, progress_callback)
-            tmp.replace(dest)
-            return
-        except InterruptedError:
-            raise
-        except Exception as e:  # noqa: BLE001 —— 切换下一源
-            errors.append(f"{url}: {e}")
+        for attempt in range(1 + retries):
+            try:
+                _download_one(url, tmp, progress_callback)
+                tmp.replace(dest)
+                return
+            except InterruptedError:
+                raise
+            except Exception as e:  # noqa: BLE001 —— 换源/重试（Range 续传，重试成本低）
+                errors.append(f"{url}（第 {attempt + 1} 次）: {e}")
     tmp.unlink(missing_ok=True)
     raise RuntimeError(f"所有下载源均失败:\n" + "\n".join(errors))
 

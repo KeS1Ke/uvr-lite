@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from uvr_lite import download as dl
 from uvr_lite.download import ensure_model
 from uvr_lite.models import DEFAULT_MODEL
 
@@ -27,6 +28,8 @@ from .consts import (
     TORCH_CPU_INDEXES,
     TORCH_CUDA_INDEXES,
     TORCH_VERSION,
+    torch_wheel_name,
+    torch_wheel_urls,
 )
 
 # 项目根（开发态代码源；打包态由 src_dir 覆盖）
@@ -115,6 +118,17 @@ def _app_version(app_dir: Path) -> str:
     return m.group(1) if m else "0.0.0"
 
 
+def _venv_python_ver(ctx: StepContext) -> tuple:
+    """查询 venv Python 主次版本（决定 torch wheel 文件名 cp3X 标签）。"""
+    out = subprocess.run(
+        [str(ctx.venv_python), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        capture_output=True, text=True, timeout=30)
+    ver = python_env.parse_version(out.stdout)
+    if ver is None:
+        raise RuntimeError(f"无法识别 venv Python 版本: {out.stdout or out.stderr}")
+    return ver
+
+
 # ---------- 步骤 ----------
 
 def step_prepare_python(ctx: StepContext) -> None:
@@ -158,15 +172,27 @@ def step_create_venv(ctx: StepContext) -> None:
 
 
 def step_install_deps(ctx: StepContext) -> None:
-    # torch：按硬件分流，已装则跳过
+    # torch：按硬件分流；wheel 用自研下载器先下好（断点续传+超时+多源回退，
+    # pip 大文件下载遇服务器断流会无限卡死），再 pip install 本地 wheel（依赖走清华）。
+    # 已装则跳过（覆盖升级/续装）。
     if not _venv_has(ctx.venv_pip, "torch"):
         gpu = shutil.which("nvidia-smi") is not None
+        py_ver = _venv_python_ver(ctx)
+        wheel_name = torch_wheel_name(py_ver, gpu)
         ctx.message(
-            "正在安装 PyTorch（" +
-            ("检测到 NVIDIA 显卡，安装 CUDA 版" if gpu else "未检测到 NVIDIA 显卡，安装 CPU 版（较慢）") +
-            f"，约 200 MB~2.5 GB）…")
-        indexes = (TORCH_CUDA_INDEXES if gpu else TORCH_CPU_INDEXES)
-        _pip_install_with_fallback(ctx, [f"torch=={TORCH_VERSION}"], indexes)
+            "正在下载 PyTorch（" +
+            ("检测到 NVIDIA 显卡，CUDA 版" if gpu else "CPU 版") +
+            f"，约 {3300 if gpu else 220} MB，可断点续传）…")
+
+        def cb(done: int, total: int) -> bool:
+            ctx.percent(int(done / total * 70) if total else 0)
+            return not ctx.cancel()
+
+        cache_dir = ctx.install_dir / "cache"
+        wheel_path = cache_dir / wheel_name
+        dl._download(torch_wheel_urls(py_ver, gpu), wheel_path, cb)
+        ctx.message("PyTorch 下载完成，正在安装…")
+        _pip_install_with_fallback(ctx, [str(wheel_path)], [PIP_INDEX, ""])
     else:
         ctx.message("PyTorch 已安装，跳过")
     ctx.percent(40)

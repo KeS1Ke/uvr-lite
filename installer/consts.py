@@ -40,6 +40,19 @@ TORCH_CPU_INDEXES = [
     "https://download.pytorch.org/whl/cpu",
 ]
 
+# torch wheel 文件名随 Python 版本（cp3X）与构建（cu128/cpu）变化；
+# Windows 的 torch wheel 内嵌 CUDA 运行库，无需额外的 nvidia-* 依赖包。
+def torch_wheel_name(python_ver: tuple, gpu: bool) -> str:
+    tag = f"cp{python_ver[0]}{python_ver[1]}"
+    build = "cu128" if gpu else "cpu"
+    return f"torch-{TORCH_VERSION}+{build}-{tag}-{tag}-win_amd64.whl"
+
+
+def torch_wheel_urls(python_ver: tuple, gpu: bool) -> list:
+    name = torch_wheel_name(python_ver, gpu)
+    indexes = TORCH_CUDA_INDEXES if gpu else TORCH_CPU_INDEXES
+    return [f"{idx}/{name}" for idx in indexes]
+
 # 常规依赖 pip 源
 PIP_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"
 

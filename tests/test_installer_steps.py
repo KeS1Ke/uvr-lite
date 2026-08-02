@@ -84,27 +84,47 @@ def test_install_deps_gpu_torch_then_pip(tmp_path, monkeypatch):
     ctx = make_ctx(tmp_path)
     (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
     monkeypatch.setattr(steps, "_venv_has", lambda pip, pkg: False)
+    monkeypatch.setattr(steps, "_venv_python_ver", lambda c: (3, 13))
     monkeypatch.setattr(shutil, "which", lambda name: "C:/nvidia-smi.exe" if name == "nvidia-smi" else None)
+    downloaded = {}
+    percents = []
+    ctx._percent = percents.append
+
+    def fake_download(urls, dest, cb=None):
+        downloaded["urls"] = urls
+        downloaded["dest"] = dest
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"wheel")
+        cb(100, 100)
+
+    monkeypatch.setattr(steps.dl, "_download", fake_download)
     pip_cmds = []
-
-    def fake_pip_install(ctx_, specs, indexes):
-        pip_cmds.append((specs, indexes))
-
-    monkeypatch.setattr(steps, "_pip_install_with_fallback", fake_pip_install)
+    monkeypatch.setattr(steps, "_pip_install_with_fallback",
+                        lambda ctx_, specs, indexes: pip_cmds.append((specs, indexes)))
     monkeypatch.setattr(steps.copy_app, "copy_app_source", lambda src, dest: 1)
+
     steps.step_install_deps(ctx)
-    # torch 源：国内镜像优先（阿里云开头），官方源兜底在最后
-    assert pip_cmds[0][0] == [f"torch=={steps.TORCH_VERSION}"]
-    assert pip_cmds[0][1] == steps.TORCH_CUDA_INDEXES
-    assert pip_cmds[0][1][0] == "https://mirrors.aliyun.com/pytorch-wheels/cu128"
-    assert pip_cmds[0][1][-1] == "https://download.pytorch.org/whl/cu128"
-    assert pip_cmds[1][0] == [f"{ctx.app_dir}[ui]"]
+    # torch wheel：自研下载器（国内镜像优先），随后 pip 装本地 wheel（依赖走清华）
+    assert downloaded["urls"][0] == "https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.7.1+cu128-cp313-cp313-win_amd64.whl"
+    assert downloaded["urls"][-1] == "https://download.pytorch.org/whl/cu128/torch-2.7.1+cu128-cp313-cp313-win_amd64.whl"
+    assert pip_cmds[0][0][0] == str(downloaded["dest"])
+    assert pip_cmds[0][1][0] == steps.PIP_INDEX
+    assert percents and percents[-1] == 100  # 下载回调到 70，最后整体 100
+    assert pip_cmds[1][0] == [f"{ctx.app_dir}[ui]"]  # 第二段：app 依赖
     assert pip_cmds[1][1][0] == steps.PIP_INDEX
 
 
 def test_torch_cpu_indexes_domestic_first():
     assert steps.TORCH_CPU_INDEXES[0] == "https://mirrors.aliyun.com/pytorch-wheels/cpu"
     assert steps.TORCH_CPU_INDEXES[-1] == "https://download.pytorch.org/whl/cpu"
+
+
+def test_torch_wheel_name_and_urls():
+    from installer.consts import torch_wheel_name, torch_wheel_urls
+    assert torch_wheel_name((3, 13), True) == "torch-2.7.1+cu128-cp313-cp313-win_amd64.whl"
+    assert torch_wheel_name((3, 12), False) == "torch-2.7.1+cpu-cp312-cp312-win_amd64.whl"
+    urls = torch_wheel_urls((3, 10), True)
+    assert urls[0].endswith("/cu128/torch-2.7.1+cu128-cp310-cp310-win_amd64.whl")
 
 
 def test_install_deps_cpu_no_torch_skip(tmp_path, monkeypatch):
