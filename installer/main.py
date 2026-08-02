@@ -238,8 +238,14 @@ class InstallerWindow(QDialog):
         from .runner import StepRunner
 
         upgrade = (self.install_dir / "install.json").exists()
-        self._runner = StepRunner(self.install_dir, upgrade,
-                                  src_dir=Path(__file__).resolve().parent.parent)
+        # 打包态（PyInstaller onefile）：代码快照解压在 _MEIPASS/app-snapshot；
+        # 开发态：项目根
+        if getattr(sys, "_MEIPASS", None):
+            snapshot = Path(sys._MEIPASS) / "app-snapshot"
+            src_dir = snapshot if (snapshot / "uvr_lite").exists() else None
+        else:
+            src_dir = Path(__file__).resolve().parent.parent
+        self._runner = StepRunner(self.install_dir, upgrade, src_dir=src_dir)
         self._thread = QThread(self)
         self._runner.moveToThread(self._thread)
         self._thread.started.connect(self._runner.run)
