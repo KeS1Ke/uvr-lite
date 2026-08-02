@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -25,16 +26,18 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from ..download import models_dir
 from ..models import MODEL_REGISTRY
 from .files import AUDIO_EXTS, dedup_paths, is_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
-from .worker import SeparationWorker
+from .worker import ModelDownloadWorker, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
 
@@ -65,6 +68,26 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget(self)
         root = QVBoxLayout(central)
+
+        # --- 模型状态提示条（缺失时显示，可一键下载）---
+        self.banner = QFrame(central)
+        self.banner.setObjectName("banner")
+        self.banner.setStyleSheet(
+            "QFrame#banner { background: #FFF8DC; border: 1px solid #E6C300; border-radius: 4px; }"
+        )
+        banner_row = QHBoxLayout(self.banner)
+        banner_row.setContentsMargins(8, 6, 8, 6)
+        self.label_banner = QLabel(self.banner)
+        self.btn_download = QPushButton("下载模型", self.banner)
+        self.dl_progress = QProgressBar(self.banner)
+        self.dl_progress.setFixedWidth(180)
+        self.dl_progress.setVisible(False)
+        banner_row.addWidget(self.label_banner)
+        banner_row.addWidget(self.dl_progress)
+        banner_row.addWidget(self.btn_download)
+        banner_row.addStretch(1)
+        root.addWidget(self.banner)
+        self.btn_download.clicked.connect(self._start_download)
 
         # --- 文件列表 ---
         file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
@@ -144,6 +167,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self.label_status)
 
         self.setCentralWidget(central)
+
+        # 控件全部就绪后再挂模型状态联动
+        self.combo_model.currentIndexChanged.connect(self._refresh_model_banner)
+        self._refresh_model_banner()
 
     # ---------- 文件列表操作 ----------
 
@@ -239,11 +266,74 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
+    # ---------- 模型下载 ----------
+
+    def _refresh_model_banner(self) -> None:
+        model = self.combo_model.currentData()
+        ready = (models_dir() / f"{model}.ckpt").exists()
+        self.banner.setVisible(not ready)
+        if not ready:
+            label = MODEL_LABELS.get(model, model)
+            self.label_banner.setText(f"模型「{label}」未下载（约 640 MB），下载后即可开始分离。")
+
+    def _start_download(self) -> None:
+        model = self.combo_model.currentData()
+        self._dl_worker = ModelDownloadWorker(model)
+        self._dl_thread = QThread(self)
+        self._dl_worker.moveToThread(self._dl_thread)
+        self._dl_thread.started.connect(self._dl_worker.run)
+        self._dl_worker.progress.connect(self._on_dl_progress)
+        self._dl_worker.finished.connect(self._on_dl_finished)
+        self._dl_thread.finished.connect(self._dl_thread.deleteLater)
+        self._dl_thread.finished.connect(self._dl_worker.deleteLater)
+
+        self.btn_download.setText("取消下载")
+        self.btn_download.clicked.disconnect()
+        self.btn_download.clicked.connect(self._cancel_download)
+        self.dl_progress.setVisible(True)
+        self.dl_progress.setValue(0)
+        self.label_banner.setText("正在下载模型…（可取消，断点续传）")
+        self._dl_thread.start()
+
+    def _cancel_download(self) -> None:
+        if self._dl_worker is not None:
+            self._dl_worker.cancel()
+            self.btn_download.setEnabled(False)
+            self.label_banner.setText("正在取消…")
+
+    def _on_dl_progress(self, done, total) -> None:
+        pct = int(done / total * 100) if total else 0
+        self.dl_progress.setValue(pct)
+        self.label_banner.setText(
+            f"正在下载模型… {done / 1e6:.0f}/{total / 1e6:.0f} MB（{pct}%，可取消）")
+
+    def _on_dl_finished(self, ok, error) -> None:
+        self._dl_thread.quit()
+        self._dl_thread.wait(3000)
+        self.dl_progress.setVisible(False)
+        self.btn_download.setEnabled(True)
+        self.btn_download.setText("下载模型")
+        self.btn_download.clicked.disconnect()
+        self.btn_download.clicked.connect(self._start_download)
+        if ok:
+            self._refresh_model_banner()  # 成功 → 提示条消失
+            self.label_status.setText("模型下载完成，可以开始分离了。")
+        else:
+            self.banner.setVisible(True)
+            self.label_banner.setText(f"模型下载未完成：{error}（点击重试）")
+
     # ---------- 任务控制 ----------
 
     def _start_clicked(self) -> None:
         if not self._paths:
             QMessageBox.information(self, "提示", "请先添加音频文件（选择文件/文件夹或拖拽）。")
+            return
+        model = self.combo_model.currentData()
+        if not (models_dir() / f"{model}.ckpt").exists():
+            QMessageBox.information(
+                self, "模型未下载",
+                "请先点击顶部「下载模型」按钮下载权重（约 640 MB），再开始分离。")
+            self._refresh_model_banner()
             return
         out_dir = self.edit_out.text().strip() or str(Path.cwd() / "output")
         out_dir = str(Path(out_dir).resolve())
@@ -345,6 +435,11 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
+        if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
+            if getattr(self, "_dl_worker", None) is not None:
+                self._dl_worker.cancel()
+            self._dl_thread.quit()
+            self._dl_thread.wait(3000)
         super().closeEvent(event)
 
 

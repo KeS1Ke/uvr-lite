@@ -13,7 +13,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from tqdm.auto import tqdm
 
@@ -47,8 +47,13 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download_one(url: str, tmp: Path) -> None:
-    """从单个源下载（支持 Range 断点续传）；失败抛异常由上层切换源。"""
+def _download_one(url: str, tmp: Path,
+                  progress_callback: Optional[Callable[[int, int], bool]] = None) -> None:
+    """从单个源下载（支持 Range 断点续传）；失败抛异常由上层切换源。
+
+    progress_callback(done_bytes, total_bytes) -> bool：返回 False 视为用户
+    取消，抛 InterruptedError（保留 .part 供下次续传）。
+    """
     existing = tmp.stat().st_size if tmp.exists() else 0
     headers = {"User-Agent": UA}
     if existing:
@@ -74,25 +79,34 @@ def _download_one(url: str, tmp: Path) -> None:
         while chunk := resp.read(1 << 20):
             f.write(chunk)
             bar.update(len(chunk))
+            if progress_callback is not None and not progress_callback(existing + bar.n, total):
+                raise InterruptedError("下载已取消")
 
 
-def _download(urls: List[str], dest: Path) -> None:
-    """按顺序尝试各下载源，全部失败才报错；完成后原子改名。"""
+def _download(urls: List[str], dest: Path,
+              progress_callback: Optional[Callable[[int, int], bool]] = None) -> None:
+    """按顺序尝试各下载源，全部失败才报错；完成后原子改名。
+
+    用户取消（InterruptedError）不切换源、保留 .part 供续传。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     errors = []
     for url in urls:
         try:
-            _download_one(url, tmp)
+            _download_one(url, tmp, progress_callback)
             tmp.replace(dest)
             return
+        except InterruptedError:
+            raise
         except Exception as e:  # noqa: BLE001 —— 切换下一源
             errors.append(f"{url}: {e}")
     tmp.unlink(missing_ok=True)
     raise RuntimeError(f"所有下载源均失败:\n" + "\n".join(errors))
 
 
-def ensure_model(name: str, force: bool = False) -> Path:
+def ensure_model(name: str, force: bool = False,
+                 progress_callback: Optional[Callable[[int, int], bool]] = None) -> Path:
     """确保模型权重已下载且 SHA256 匹配；返回权重路径。"""
     info = get_model_info(name)
     ckpt = models_dir() / f"{name}.ckpt"
@@ -106,7 +120,7 @@ def ensure_model(name: str, force: bool = False) -> Path:
 
     print(f"下载模型 {name}（{info['description']}）")
     urls = [info["ckpt_url"]] + list(info.get("mirror_urls", []))
-    _download(urls, ckpt)
+    _download(urls, ckpt, progress_callback)
     actual = sha256_of(ckpt)
     if actual != info["sha256"]:
         ckpt.unlink()

@@ -57,6 +57,36 @@ class SeparationWorker(QObject):
         return not self._cancel
 
 
+class ModelDownloadWorker(QObject):
+    """模型权重下载任务（复用 ensure_model：断点续传 + 多源回退 + SHA256）。"""
+
+    progress = Signal(int, int)   # done_bytes, total_bytes
+    finished = Signal(bool, str)  # 是否成功, 错误/取消信息
+
+    def __init__(self, model_name: str):
+        super().__init__()
+        self.model_name = model_name
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            from ..download import ensure_model
+
+            ensure_model(self.model_name, progress_callback=self._cb)
+            self.finished.emit(True, "")
+        except InterruptedError:
+            self.finished.emit(False, "已取消（支持断点续传，可随时重新下载）")
+        except Exception as e:  # noqa: BLE001
+            self.finished.emit(False, str(e))
+
+    def _cb(self, done: int, total: int) -> bool:
+        self.progress.emit(done, total)
+        return not self._cancel
+
+
 def friendly_error(e: Exception) -> str:
     """把异常转成非专业用户可读的中文信息。"""
     from audioread.exceptions import NoBackendError
