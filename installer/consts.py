@@ -24,12 +24,22 @@ GREEN_PY_URLS = [
     f"python-build-standalone/releases/download/{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
 ]
 
-# torch：cu128（RTX 30/40/50 系均可）与 CPU 两种构建，均带清华镜像回退
+# torch：cu128（RTX 30/40/50 系均可）与 CPU 两种构建。
+# 国内镜像优先（清华 → 阿里云 → 上海交大），官方源兜底——
+# 镜像为整目录同步（torch 本体 + nvidia-* 依赖齐全），失败自动切下一个源。
 TORCH_VERSION = "2.7.1"
-TORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
-TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-TORCH_MIRROR_CUDA = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128"
-TORCH_MIRROR_CPU = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu"
+TORCH_CUDA_INDEXES = [
+    "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128",
+    "https://mirrors.aliyun.com/pytorch-wheels/cu128",
+    "https://mirror.sjtu.edu.cn/pytorch-wheels/cu128",
+    "https://download.pytorch.org/whl/cu128",
+]
+TORCH_CPU_INDEXES = [
+    "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu",
+    "https://mirrors.aliyun.com/pytorch-wheels/cpu",
+    "https://mirror.sjtu.edu.cn/pytorch-wheels/cpu",
+    "https://download.pytorch.org/whl/cpu",
+]
 
 # 常规依赖 pip 源
 PIP_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"

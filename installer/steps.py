@@ -24,10 +24,8 @@ from uvr_lite.models import DEFAULT_MODEL
 from . import copy_app, marker, proc, python_env, shortcuts
 from .consts import (
     PIP_INDEX,
-    TORCH_CPU_INDEX,
-    TORCH_CUDA_INDEX,
-    TORCH_MIRROR_CPU,
-    TORCH_MIRROR_CUDA,
+    TORCH_CPU_INDEXES,
+    TORCH_CUDA_INDEXES,
     TORCH_VERSION,
 )
 
@@ -167,8 +165,7 @@ def step_install_deps(ctx: StepContext) -> None:
             "正在安装 PyTorch（" +
             ("检测到 NVIDIA 显卡，安装 CUDA 版" if gpu else "未检测到 NVIDIA 显卡，安装 CPU 版（较慢）") +
             f"，约 200 MB~2.5 GB）…")
-        indexes = ([TORCH_CUDA_INDEX, TORCH_MIRROR_CUDA] if gpu
-                   else [TORCH_CPU_INDEX, TORCH_MIRROR_CPU])
+        indexes = (TORCH_CUDA_INDEXES if gpu else TORCH_CPU_INDEXES)
         _pip_install_with_fallback(ctx, [f"torch=={TORCH_VERSION}"], indexes)
     else:
         ctx.message("PyTorch 已安装，跳过")
