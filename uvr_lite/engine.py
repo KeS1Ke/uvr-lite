@@ -75,6 +75,7 @@ def separate_file(
     fmt: str = "auto",  # auto | flac | wav
     bigshifts: int = 1,
     tta: bool = False,
+    batch_size: Optional[int] = None,
     verbose: bool = True,
 ) -> List[Path]:
     """分离单个音频文件，输出 {stem}-vocals 与 {stem}-instrumental 两个文件。"""
@@ -87,6 +88,10 @@ def separate_file(
     device = pick_device(device)
     ckpt = ensure_model(model_name)
     model, config = load_model(model_name, ckpt, device)
+
+    # 低显存 GPU 可调小批大小防 OOM（默认取模型配置 yaml）
+    if batch_size is not None and batch_size >= 1:
+        config.inference["batch_size"] = batch_size
 
     sample_rate: int = getattr(config.audio, "sample_rate", 44100)
     if verbose:

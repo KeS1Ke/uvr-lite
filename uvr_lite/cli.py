@@ -18,6 +18,7 @@ def _cmd_separate(args: argparse.Namespace) -> int:
             inp, args.out,
             model_name=args.model, pcm=pcm, device=args.device,
             fmt=args.format, bigshifts=args.bigshifts, tta=args.tta,
+            batch_size=args.batch_size,
         )
     return 0
 
@@ -54,8 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sep = sub.add_parser("separate", help="分离人声/伴奏（核心命令）")
     p_sep.add_argument("input", nargs="+", help="输入音频文件（支持多文件）")
     p_sep.add_argument("--out", "-o", default="output", help="输出目录（默认 ./output）")
+    # 注意：separate 只接受具体模型名（all 仅 download 命令用）
     p_sep.add_argument("--model", "-m", default=DEFAULT_MODEL,
-                       choices=list(MODEL_REGISTRY) + ["all"], help="模型（默认 bs_roformer_ep317）")
+                       choices=list(MODEL_REGISTRY), help="模型（默认 bs_roformer_ep317）")
     p_sep.add_argument("--format", default="auto", choices=["auto", "flac", "wav"],
                        help="输出格式：auto 按峰值自动选择（默认）；flac/wav 强制")
     p_sep.add_argument("--pcm", type=int, default=24, choices=[16, 24], help="FLAC 位深（默认 24）")
@@ -63,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="推理设备（默认 auto 自动检测）")
     p_sep.add_argument("--bigshifts", type=int, default=1,
                        help="圆形时移平均次数（>1 提升质量但线性增耗时，默认 1）")
+    p_sep.add_argument("--batch-size", type=int, default=None,
+                       help="推理批大小（默认取模型配置；低显存 GPU 可设 1 防 OOM）")
     p_sep.add_argument("--tta", action="store_true",
                        help="测试时增强（极性/声道反转平均，三倍耗时，默认关）")
     p_sep.set_defaults(func=_cmd_separate)
