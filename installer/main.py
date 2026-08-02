@@ -238,7 +238,8 @@ class InstallerWindow(QDialog):
         from .runner import StepRunner
 
         upgrade = (self.install_dir / "install.json").exists()
-        self._runner = StepRunner(self.install_dir, upgrade)
+        self._runner = StepRunner(self.install_dir, upgrade,
+                                  src_dir=Path(__file__).resolve().parent.parent)
         self._thread = QThread(self)
         self._runner.moveToThread(self._thread)
         self._thread.started.connect(self._runner.run)
@@ -255,8 +256,8 @@ class InstallerWindow(QDialog):
         self.label_run_status.setText("准备中…")
         self._thread.start()
 
-    def _on_step(self, idx, title) -> None:
-        self.label_run_title.setText(f"正在安装…（{idx + 1}/5）{title}")
+    def _on_step(self, idx, total, title) -> None:
+        self.label_run_title.setText(f"正在安装…（{idx + 1}/{total}）{title}")
 
     def _on_finished(self, ok, error) -> None:
         self._thread.quit()
