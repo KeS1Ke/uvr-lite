@@ -54,9 +54,9 @@ def spectrogram_image(path, out_path, max_s=None, title=""):
     img_small = img_rows[:, ::max(1, step)][:, :n_cols]
     im = Image.fromarray(img_small)
     im = im.resize((900, 400), Image.LANCZOS)
-    # 染色: 冷色低能量 -> 暖色高能量
+    # 染色: 冷色低能量 -> 暖色高能量（a 保持 0~255 整数域，浮点直接赋 uint8 会被截断为 0）
     rgb = np.zeros((400, 900, 3), dtype=np.uint8)
-    a = np.asarray(im, dtype=float) / 255.0
+    a = np.asarray(im, dtype=float)
     rgb[..., 0] = np.clip(a * 1.6, 0, 255)          # 红
     rgb[..., 1] = np.clip(a * 0.9 - 0.15, 0, 255)   # 绿
     rgb[..., 2] = np.clip(a * 0.5 - 0.25, 0, 255)   # 蓝

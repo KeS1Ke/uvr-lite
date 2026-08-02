@@ -1,43 +1,55 @@
 # uvr-lite
 
-轻量级**人声 / 伴奏分离**命令行工具：一个模型文件（约 640 MB），一条命令，输出两个无损音轨。
+![version](https://img.shields.io/badge/version-0.1.0-8A2BE2)
+![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
+![license](https://img.shields.io/badge/license-MIT-green)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
+![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 
-```
+**轻量级人声 / 伴奏分离命令行工具** —— 一个模型文件（约 640 MB），一条命令，输出两个无损音轨。
+
+```bash
 uvr-lite separate 歌曲.flac -o output
 # → output/歌曲-vocals.flac        （人声轨）
-# → output/歌曲-instrumental.flac  （伴奏轨，= 原曲 - 人声，数学无损）
+# → output/歌曲-instrumental.flac  （伴奏轨，= 原曲 − 人声，数学无损）
 ```
+
+## 演示
+
+下图为一段 **MiMo TTS 合成人声 + 合成器伴奏** 混合音频的分离效果（对数频谱，冷色低能量 → 暖色高能量）：
+
+![demo](docs/images/demo-spectrograms.png)
+
+- **中间（人声轨）**：平滑的谐波横纹随旋律起伏 —— 歌声被完整提取
+- **右侧（伴奏轨）**：低频能量带 + 打击乐瞬态 —— 节奏部分被完整保留
 
 ## 特性
 
 - **一键部署**：`install.bat`（Windows）/ `install.sh`（Linux/macOS）自动完成 venv + 依赖 + torch（CPU/CUDA 自动分流）+ 模型下载（SHA256 校验）+ 冒烟测试
-- **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（~3 分钟）约 **51 秒**
-- **双格式输出**：FLAC（16/24 bit）或 WAV，44.1 kHz 原采样率
+- **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（约 3 分钟）约 **51 秒**
+- **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
 - **无 GUI、无训练代码**：仅推理，仓库代码 < 1 MB
 - 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
 
-## 安装
+## 快速开始
 
-### Windows
+### 一键安装
+
+**Windows**
 
 ```bat
 install.bat
 ```
 
-### Linux / macOS
+**Linux / macOS**
 
 ```bash
 bash install.sh
 ```
 
-脚本会自动：
-1. 创建虚拟环境 `.venv`
-2. 检测 NVIDIA 显卡 → 安装 CUDA 版 torch（无卡装 CPU 版）
-3. 安装 uvr-lite 与依赖
-4. 下载模型权重（约 640 MB，SHA256 校验）
-5. （GPU 环境）3 秒测试音冒烟测试
+脚本自动完成：创建虚拟环境 `.venv` → 检测 NVIDIA 显卡（有卡装 CUDA 版 torch / 无卡装 CPU 版）→ 安装依赖 → 下载模型权重（约 640 MB，SHA256 校验）→ （GPU 环境）冒烟测试。
 
-或手动安装：
+### 手动安装
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -57,7 +69,7 @@ uvr-lite separate a.flac b.wav -o out --format flac --pcm 24
 # 其他模型（备选）
 uvr-lite separate song.flac -m mel_band_karaoke
 
-# 查看模型状态 / 重新下载
+# 查看模型状态 / 强制重下
 uvr-lite models
 uvr-lite download --force
 ```
@@ -71,14 +83,6 @@ uvr-lite download --force
 | `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
 
-### 可选配套脚本（源自 Museic 项目，独立于分离核心）
-
-`scripts/` 下提供三个纯 numpy 工具（不进核心 CLI，仅 numpy/Pillow 依赖）：
-
-- `scripts/analyze.py`：DSP 原曲分析（BPM/调性/和弦/结构/音色统计），输出 Markdown 报告
-- `scripts/compose.py`：算法作曲引擎（可复现的旋律+编曲合成）
-- `scripts/render_spectro.py`：频谱图渲染（PNG）
-
 ## 工作原理
 
 ```
@@ -88,8 +92,29 @@ uvr-lite download --force
        → soundfile 写 FLAC/WAV
 ```
 
-- 引擎：`msst/` 目录为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪掉训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
-- 模型：`.ckpt` 权重托管于 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)（UVR 官方模型仓库），带 SHA256 完整性校验，不入 git
+- **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
+- **模型**：`.ckpt` 权重托管于 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)（UVR 官方模型仓库），SHA256 完整性校验，不入 git
+- **代码结构**
+
+```
+uvr-lite/
+├── uvr_lite/          # CLI 包：separate / download / models 命令
+│   ├── engine.py      #   分离引擎（bigshifts 平均、instrumental 数学无损）
+│   ├── models.py      #   模型注册表（URL + SHA256）
+│   ├── download.py    #   流式下载 + 完整性校验
+│   └── configs/       #   模型配置 yaml
+├── msst/              # vendored 推理引擎（ZFTurbo MSST 裁剪子集，MIT）
+├── install.bat|sh     # 一键安装脚本
+└── scripts/           # 可选配套：analyze（DSP 分析）/ compose（算法作曲）/ render_spectro（频谱图）
+```
+
+### 可选配套脚本
+
+`scripts/` 下提供三个纯 numpy 工具（独立于分离核心，仅 numpy/Pillow 依赖）：
+
+- `scripts/analyze.py`：DSP 原曲分析（BPM/调性/和弦/结构/音色统计），输出 Markdown 报告
+- `scripts/compose.py`：算法作曲引擎（可复现的旋律 + 编曲合成）
+- `scripts/render_spectro.py`：对数频谱图渲染（PNG，本仓库演示图即由此生成）
 
 ## 致谢（Reference）
 
