@@ -131,3 +131,21 @@ def test_ensure_model_downloads_with_progress(fake_download_env):
     dl.ensure_model("test_model", progress_callback=cb)
     assert (fake_download_env / "test_model.ckpt").read_bytes() == DATA
     assert calls[-1] == (len(DATA), len(DATA))
+
+
+# ---------- UVR_MODEL_DIR 环境变量（安装场景：模型目录指向安装目录） ----------
+
+def test_models_dir_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("UVR_MODEL_DIR", str(tmp_path / "custom"))
+    from uvr_lite import download
+    monkeypatch.setattr(download, "repo_root", lambda: tmp_path / "repo")
+    d = download.models_dir()
+    assert d == tmp_path / "custom"
+    assert d.exists()
+
+
+def test_models_dir_default_no_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("UVR_MODEL_DIR", raising=False)
+    from uvr_lite import download
+    monkeypatch.setattr(download, "repo_root", lambda: tmp_path / "repo")
+    assert download.models_dir() == tmp_path / "repo" / "models"

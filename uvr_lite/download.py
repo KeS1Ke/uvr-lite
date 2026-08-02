@@ -28,7 +28,10 @@ def repo_root() -> Path:
 
 
 def models_dir() -> Path:
-    d = repo_root() / "models"
+    """模型目录：优先环境变量 UVR_MODEL_DIR（安装场景指向安装目录），
+    否则为仓库根下的 models/。"""
+    override = os.environ.get("UVR_MODEL_DIR")
+    d = Path(override) if override else repo_root() / "models"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

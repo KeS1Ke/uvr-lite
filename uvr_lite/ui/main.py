@@ -5,6 +5,7 @@
 输出目录（QSettings 记忆）、♪ 窗口图标。推理接线在票 3，开始按钮暂禁用。
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -458,6 +459,11 @@ class QProgressBarWrap(QWidget):
 
 
 def run() -> int:
+    # 安装场景：--model-dir 指向安装目录下的 models（环境变量让 uvr_lite.download 复用）
+    if "--model-dir" in sys.argv:
+        idx = sys.argv.index("--model-dir")
+        if idx + 1 < len(sys.argv):
+            os.environ["UVR_MODEL_DIR"] = sys.argv[idx + 1]
     # Windows 任务栏图标跟随窗口图标（否则显示 Python 默认图标）
     if sys.platform == "win32":
         import ctypes
