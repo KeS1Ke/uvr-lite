@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QStackedLayout,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -47,13 +47,16 @@ class InstallerWindow(QDialog):
         super().__init__(parent)
         self.setWindowTitle("uvr-lite 安装向导")
         self.setWindowIcon(QIcon(str(_ICON)))
-        self.setFixedWidth(560)
+        self.setFixedSize(560, 430)
         self.install_dir = Path(DEFAULT_DIR)
         self._runner = None
         self._thread = None
         self._failed = False
 
-        self.stack = QStackedLayout(self)
+        # 注意：QStackedLayout 不能带 parent 构造（会抢占窗口布局，导致后续
+        # QVBoxLayout 永远 attach 不上、按钮失去布局管理而叠在文字上）。
+        # 用 QStackedWidget 作为普通控件，窗口布局只有一层 QVBoxLayout。
+        self.stack = QStackedWidget()
         self._build_welcome()
         self._build_dir_page()
         self._build_run_page()
@@ -63,9 +66,8 @@ class InstallerWindow(QDialog):
         self.btn_next = QPushButton("下一步", self)
         self.btn_cancel = QPushButton("取消", self)
         nav = QHBoxLayout()
-        # 先 attach 布局（获得宿主）再 addWidget，否则按钮会成为无 parent 的顶层窗口
         outer = QVBoxLayout(self)
-        outer.addLayout(self.stack)
+        outer.addWidget(self.stack)
         outer.addLayout(nav)
         nav.addStretch(1)
         nav.addWidget(self.btn_back)
@@ -80,7 +82,7 @@ class InstallerWindow(QDialog):
     # ---------- 页面 ----------
 
     def _build_welcome(self) -> None:
-        page = QWidget(self)
+        page = QWidget()
         lay = QVBoxLayout(page)
         title = QLabel("欢迎使用 uvr-lite")
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
@@ -97,7 +99,7 @@ class InstallerWindow(QDialog):
         self.stack.addWidget(page)
 
     def _build_dir_page(self) -> None:
-        page = QWidget(self)
+        page = QWidget()
         lay = QVBoxLayout(page)
         title = QLabel("选择安装位置")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -119,7 +121,7 @@ class InstallerWindow(QDialog):
         self.edit_dir.textChanged.connect(self._on_dir_changed)
 
     def _build_run_page(self) -> None:
-        page = QWidget(self)
+        page = QWidget()
         lay = QVBoxLayout(page)
         self.label_run_title = QLabel("正在安装…")
         self.label_run_title.setStyleSheet("font-size: 16px; font-weight: bold;")
@@ -150,7 +152,7 @@ class InstallerWindow(QDialog):
         self.stack.addWidget(page)
 
     def _build_done_page(self) -> None:
-        page = QWidget(self)
+        page = QWidget()
         lay = QVBoxLayout(page)
         self.label_done = QLabel("")
         self.label_done.setWordWrap(True)
