@@ -1,0 +1,28 @@
+# 模型权重（640MB+，由 `uvr-lite download` 获取，不入 git）
+/models/
+*.part
+
+# 虚拟环境
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# 音频产物
+output*/
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.m4a
+_smoke*
+
+# 其他
+.DS_Store
+Thumbs.db
