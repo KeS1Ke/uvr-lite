@@ -7,8 +7,9 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
+![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**A lightweight vocal / instrumental separation CLI** — one model file (~640 MB), one command, two lossless stems.
+**A lightweight vocal / instrumental separation tool** — one model file (~640 MB), a one-click installer, two lossless stems. Ships both a **Chinese desktop GUI (Windows)** and a **CLI**.
 
 ```bash
 uvr-lite separate song.flac -o output
@@ -32,6 +33,21 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 - **Lossless output**: FLAC (16/24 bit) or WAV, original 44.1 kHz sample rate preserved
 - **No GUI, no training code**: inference only, repo code < 1 MB
 - Optional second model: `mel_band_karaoke` (Mel-Band RoFormer Karaoke, trained by aufr33 & viperx)
+
+## Desktop GUI (Windows, recommended for non-technical users)
+
+**Download**: [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) (~49 MB)
+
+1. **Double-click** the installer; pick an install location — a `uvr-lite` subfolder is created automatically (no file scattering)
+2. The wizard handles everything: Python (reuses a system Python ≥ 3.10, otherwise downloads a bundled one), PyTorch (CUDA build for NVIDIA GPUs via domestic mirrors, CPU otherwise), the model (~640 MB, SHA256 verified, resumable)
+3. **Done** — a ♪ shortcut appears on your **desktop and Start menu**; double-click it to open the GUI
+4. Drag songs in (or pick a folder), choose the model, click **开始分离** (Start Separation) — live progress + ETA; completed files get a ✓, unreadable formats get a ✗ before processing starts
+
+Tips:
+
+- **Upgrade**: run the installer again — it updates the app and keeps your downloaded models
+- **Uninstall**: `uvr-lite-setup.exe --uninstall` (deletes the install folder and both shortcuts)
+- The GUI is in Chinese by design (target users: family & friends); the CLI below remains for power users
 
 ## Quick Start
 

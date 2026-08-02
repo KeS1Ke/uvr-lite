@@ -7,8 +7,9 @@
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
+![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**轻量级人声 / 伴奏分离命令行工具** —— 一个模型文件（约 640 MB），一条命令，输出两个无损音轨。
+**轻量级人声 / 伴奏分离工具** —— 一个模型文件（约 640 MB），一键安装，输出两个无损音轨。同时提供 **中文桌面界面（Windows）** 与 **命令行**。
 
 ```bash
 uvr-lite separate 歌曲.flac -o output
@@ -32,6 +33,21 @@ uvr-lite separate 歌曲.flac -o output
 - **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
 - **无 GUI、无训练代码**：仅推理，仓库代码 < 1 MB
 - 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
+
+## 桌面界面（Windows，推荐非专业用户）
+
+**下载**：[uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe)（约 49 MB）
+
+1. **双击安装**，选择安装位置——程序会自动在所选文件夹下创建 `uvr-lite` 子文件夹（不会散落文件）
+2. 向导全自动：Python（有系统 Python ≥3.10 直接复用，没有则下载内置版）→ PyTorch（检测到 NVIDIA 显卡装 CUDA 版，走国内镜像加速；否则 CPU 版）→ 模型下载（约 640 MB，SHA256 校验，可断点续传）
+3. **完成**——桌面与开始菜单出现 **♪ 快捷方式**，双击即可打开界面
+4. 把歌曲拖进窗口（或选择文件夹），选好模型，点「**开始分离**」——实时进度 + 预计剩余时间；处理完的文件打 **✓**，无法识别的格式在开始前就被标 **✗** 并跳过
+
+小贴士：
+
+- **升级**：重新运行安装程序即可——自动更新程序，保留已下载的模型
+- **卸载**：运行 `uvr-lite-setup.exe --uninstall`（删除安装目录与两处快捷方式）
+- 界面为中文（面向亲友设计的）；命令行用法见下文，供高级用户使用
 
 ## 快速开始
 
