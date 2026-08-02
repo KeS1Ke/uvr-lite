@@ -30,7 +30,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_ICON = Path(__file__).resolve().parent.parent / "uvr_lite" / "ui" / "resources" / "uvr-lite.ico"
+def _find_icon() -> Path:
+    """♪ 图标路径：打包态（PyInstaller onefile）图标在快照目录
+    _MEIPASS/app-snapshot/uvr_lite/ui/resources/；开发态在项目根。"""
+    if getattr(sys, "_MEIPASS", None):
+        p = Path(sys._MEIPASS) / "app-snapshot" / "uvr_lite" / "ui" / "resources" / "uvr-lite.ico"
+        if p.exists():
+            return p
+    return Path(__file__).resolve().parent.parent / "uvr_lite" / "ui" / "resources" / "uvr-lite.ico"
+
+
+_ICON = _find_icon()
 DEFAULT_DIR = Path.home() / "uvr-lite"
 
 PAGE_WELCOME, PAGE_DIR, PAGE_RUN, PAGE_DONE = 0, 1, 2, 3
