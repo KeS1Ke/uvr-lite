@@ -25,17 +25,16 @@ GREEN_PY_URLS = [
 ]
 
 # torch：cu128（RTX 30/40/50 系均可）与 CPU 两种构建。
-# 国内镜像优先（清华 → 阿里云 → 上海交大），官方源兜底——
-# 镜像为整目录同步（torch 本体 + nvidia-* 依赖齐全），失败自动切下一个源。
+# 国内镜像优先（阿里云 → 上海交大），官方源兜底——失败自动切下一个源。
+# 注：清华 TUNA pytorch-wheels 实测对 cu128 返回 404/回源到 download-r2.pytorch.org
+# （该域名部分地区 DNS 不可解析），故不列入。
 TORCH_VERSION = "2.7.1"
 TORCH_CUDA_INDEXES = [
-    "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128",
     "https://mirrors.aliyun.com/pytorch-wheels/cu128",
     "https://mirror.sjtu.edu.cn/pytorch-wheels/cu128",
     "https://download.pytorch.org/whl/cu128",
 ]
 TORCH_CPU_INDEXES = [
-    "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu",
     "https://mirrors.aliyun.com/pytorch-wheels/cpu",
     "https://mirror.sjtu.edu.cn/pytorch-wheels/cpu",
     "https://download.pytorch.org/whl/cpu",

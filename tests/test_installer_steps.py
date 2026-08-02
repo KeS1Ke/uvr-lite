@@ -93,17 +93,17 @@ def test_install_deps_gpu_torch_then_pip(tmp_path, monkeypatch):
     monkeypatch.setattr(steps, "_pip_install_with_fallback", fake_pip_install)
     monkeypatch.setattr(steps.copy_app, "copy_app_source", lambda src, dest: 1)
     steps.step_install_deps(ctx)
-    # torch 源：国内镜像优先（清华开头），官方源兜底在最后
+    # torch 源：国内镜像优先（阿里云开头），官方源兜底在最后
     assert pip_cmds[0][0] == [f"torch=={steps.TORCH_VERSION}"]
     assert pip_cmds[0][1] == steps.TORCH_CUDA_INDEXES
-    assert pip_cmds[0][1][0].startswith("https://mirrors.tuna.tsinghua.edu.cn")
+    assert pip_cmds[0][1][0] == "https://mirrors.aliyun.com/pytorch-wheels/cu128"
     assert pip_cmds[0][1][-1] == "https://download.pytorch.org/whl/cu128"
     assert pip_cmds[1][0] == [f"{ctx.app_dir}[ui]"]
     assert pip_cmds[1][1][0] == steps.PIP_INDEX
 
 
 def test_torch_cpu_indexes_domestic_first():
-    assert steps.TORCH_CPU_INDEXES[0].startswith("https://mirrors.tuna.tsinghua.edu.cn")
+    assert steps.TORCH_CPU_INDEXES[0] == "https://mirrors.aliyun.com/pytorch-wheels/cpu"
     assert steps.TORCH_CPU_INDEXES[-1] == "https://download.pytorch.org/whl/cpu"
 
 
