@@ -36,6 +36,19 @@ DEFAULT_DIR = Path.home() / "uvr-lite"
 PAGE_WELCOME, PAGE_DIR, PAGE_RUN, PAGE_DONE = 0, 1, 2, 3
 
 
+def resolve_install_path(selected: Path) -> Path:
+    """浏览选择位置后，自动在其下新建 uvr-lite 子目录，防止文件散落安装。
+
+    例外（不追加，直接作为安装路径）：
+    - 所选目录本身就叫 uvr-lite（不区分大小写）；
+    - 所选目录已是 uvr-lite 安装目录（含 install.json，覆盖升级场景）。
+    """
+    selected = Path(selected).resolve()
+    if selected.name.lower() == "uvr-lite" or (selected / "install.json").exists():
+        return selected
+    return selected / "uvr-lite"
+
+
 def _set_app_user_model_id(app_id: str) -> None:
     """Windows 任务栏图标跟随窗口图标（否则显示 Python 默认图标）。"""
     if sys.platform == "win32":
@@ -104,7 +117,7 @@ class InstallerWindow(QDialog):
         title = QLabel("选择安装位置")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         lay.addWidget(title)
-        lay.addWidget(QLabel("所有文件（程序、Python、依赖、模型）都会安装到这个文件夹："))
+        lay.addWidget(QLabel("选择一个位置，程序会自动在所选文件夹下创建 uvr-lite 子文件夹，\n所有文件（程序、Python、依赖、模型）都装在里面："))
         row = QHBoxLayout()
         self.edit_dir = QLineEdit(str(DEFAULT_DIR), page)
         self.btn_browse = QPushButton("浏览…", page)  # 显式 parent，防孤儿顶层窗口
@@ -206,9 +219,9 @@ class InstallerWindow(QDialog):
 
     def _browse_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "选择安装位置", str(self.install_dir.parent))
+            self, "选择安装位置", str(self.install_dir))
         if folder:
-            self.edit_dir.setText(folder)
+            self.edit_dir.setText(str(resolve_install_path(folder)))
 
     def _on_dir_changed(self) -> None:
         self.install_dir = Path(self.edit_dir.text().strip() or str(DEFAULT_DIR)).resolve()
