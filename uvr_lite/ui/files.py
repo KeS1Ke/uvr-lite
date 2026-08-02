@@ -15,16 +15,25 @@ def is_audio(path: Path) -> bool:
 def precheck_audio(path: Path) -> bool:
     """开始分离前的快速格式预检：读取音频头判断能否解码（不完整解码）。
 
-    与 librosa 的实际解码后端（audioread）一致——文件内容真是音频时，
-    即使后缀被改成 doc/txt 也能识别为可处理；真正的 Word 等非音频内容会被拒绝。
+    与 librosa 的实际解码链路一致（soundfile 优先、audioread 兜底）：
+    - flac/mp3/wav/ogg → soundfile（libsndfile 原生支持，无需外部解码器）
+    - m4a 等 → audioread 兜底（有 ffmpeg 时可用）
+    文件内容真是音频时，即使后缀被改成 doc/txt 也能识别；真 Word 等非音频被拒绝。
     """
+    import soundfile as sf
+
+    try:
+        info = sf.info(str(path))
+        return info.frames > 0 and info.samplerate > 0
+    except Exception:  # noqa: BLE001 —— 交给 audioread 兜底
+        pass
     import audioread
 
     try:
         with audioread.audio_open(str(path)) as f:
-            _ = f.duration  # 读 header 即可，不拉取完整数据
+            _ = f.duration
         return True
-    except Exception:  # noqa: BLE001 —— NoBackendError/DecodeError/OSError 等均视为不可处理
+    except Exception:  # noqa: BLE001 —— NoBackendError/DecodeError/OSError 均视为不可处理
         return False
 
 

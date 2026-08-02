@@ -53,6 +53,30 @@ def test_precheck_audio_valid_wav(tmp_path):
     assert precheck_audio(p) is True
 
 
+def test_precheck_audio_valid_flac(tmp_path):
+    """flac 靠 soundfile（libsndfile）探测——audioread 无外部后端会误判，回归测试。"""
+    import numpy as np
+    import soundfile as sf
+
+    from uvr_lite.ui.files import precheck_audio
+
+    p = tmp_path / "song.flac"
+    sf.write(str(p), np.zeros(44100), 44100)
+    assert precheck_audio(p) is True
+
+
+def test_precheck_audio_unicode_filename(tmp_path):
+    """日文文件名（空格/非 ASCII）不应影响探测。"""
+    import numpy as np
+    import soundfile as sf
+
+    from uvr_lite.ui.files import precheck_audio
+
+    p = tmp_path / "ネクライトーキー - 煙とブルー.flac"
+    sf.write(str(p), np.zeros(44100), 44100)
+    assert precheck_audio(p) is True
+
+
 def test_precheck_audio_garbage_rejected(tmp_path):
     from uvr_lite.ui.files import precheck_audio
 
