@@ -61,6 +61,14 @@ uvr-lite download                                    # download the model (~640 
 
 ## Usage
 
+> **Before each use**, activate the virtual environment (the installer's activation is not persistent):
+>
+> ```bash
+> source .venv/bin/activate        # Windows: .venv\Scripts\activate
+> ```
+>
+> Or call the binary directly: `.venv/bin/uvr-lite` (Windows: `.venv\Scripts\uvr-lite.exe`).
+
 ```bash
 # Single file
 uvr-lite separate song.mp3 -o output
@@ -70,6 +78,9 @@ uvr-lite separate a.flac b.wav -o out --format flac --pcm 24
 
 # Alternative model
 uvr-lite separate song.flac -m mel_band_karaoke
+
+# Low-VRAM GPUs: smaller batch size prevents OOM
+uvr-lite separate song.flac --batch-size 1
 
 # List models / force re-download
 uvr-lite models
@@ -83,7 +94,14 @@ uvr-lite download --force
 | `--pcm` | FLAC bit depth `16` / `24` (default) |
 | `--device` | `auto` (default) / `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | Number of circular time-shift passes; >1 improves quality at linear cost (default 1) |
+| `--batch-size N` | Inference batch size (default from model config); set `1` on low-VRAM GPUs |
 | `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
+
+**Notes**
+
+- **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
+- **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
+- **Disk space**: ~4 GB total (CUDA torch 2.5 GB + model 640 MB + dependencies)
 
 ## How It Works
 

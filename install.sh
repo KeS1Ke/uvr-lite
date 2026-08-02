@@ -57,6 +57,9 @@ fi
 
 echo
 echo "============ INSTALLATION COMPLETE ============"
+echo "Before each use, activate the virtual environment:"
+echo "  source .venv/bin/activate"
+echo
 echo "Usage:"
 echo "  uvr-lite separate song.mp3 -o output"
 echo "  uvr-lite models        list models / status"

@@ -67,6 +67,9 @@ if errorlevel 1 (
 
 echo.
 echo ============ INSTALLATION COMPLETE ============
+echo Before each use, activate the virtual environment:
+echo   .venv\Scripts\activate
+echo.
 echo Usage:
 echo   uvr-lite separate song.mp3 -o output
 echo   uvr-lite separate a.mp3 b.flac -o out  ^(multiple files^)

@@ -61,6 +61,14 @@ uvr-lite download                                    # 下载模型（约 640 MB
 
 ## 用法
 
+> **每次使用前**先激活虚拟环境（安装脚本里的激活不跨终端生效）：
+>
+> ```bash
+> source .venv/bin/activate        # Windows: .venv\Scripts\activate
+> ```
+>
+> 或直接调用完整路径：`.venv/bin/uvr-lite`（Windows: `.venv\Scripts\uvr-lite.exe`）。
+
 ```bash
 # 单文件
 uvr-lite separate song.mp3 -o output
@@ -70,6 +78,9 @@ uvr-lite separate a.flac b.wav -o out --format flac --pcm 24
 
 # 其他模型（备选）
 uvr-lite separate song.flac -m mel_band_karaoke
+
+# 低显存 GPU：调小批大小防 OOM
+uvr-lite separate song.flac --batch-size 1
 
 # 查看模型状态 / 强制重下
 uvr-lite models
@@ -83,7 +94,14 @@ uvr-lite download --force
 | `--pcm` | FLAC 位深 `16` / `24`（默认） |
 | `--device` | `auto`（默认）/ `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
+| `--batch-size N` | 推理批大小（默认取模型配置）；低显存 GPU 可设 `1` 防 OOM |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
+
+**注意事项**
+
+- **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
+- **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
+- **磁盘占用**约 4 GB（CUDA torch 2.5GB + 模型 640MB + 依赖）
 
 ## 工作原理
 
