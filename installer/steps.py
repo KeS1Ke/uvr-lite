@@ -121,7 +121,7 @@ def _app_version(app_dir: Path) -> str:
 def _venv_python_ver(ctx: StepContext) -> tuple:
     """查询 venv Python 主次版本（决定 torch wheel 文件名 cp3X 标签）。"""
     out = subprocess.run(
-        [str(ctx.venv_python), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+        [str(ctx.venv_python), "-c", "import sys; print(sys.version.split()[0])"],
         capture_output=True, text=True, timeout=30)
     ver = python_env.parse_version(out.stdout)
     if ver is None:
