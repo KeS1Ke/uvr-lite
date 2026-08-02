@@ -54,7 +54,7 @@ bash install.sh
 ### 手动安装
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat（PowerShell: .venv\Scripts\Activate.ps1）
 pip install -e .
 uvr-lite download                                    # 下载模型（约 640 MB）
 ```
@@ -63,11 +63,19 @@ uvr-lite download                                    # 下载模型（约 640 MB
 
 > **每次使用前**先激活虚拟环境（安装脚本里的激活不跨终端生效）。请按你的 shell 选择命令：
 >
-> **PowerShell**（Windows）
+> **pwsh（PowerShell 7+）**（Windows）— 打开：Win+R 输入 `pwsh` 或开始菜单「PowerShell 7」；未安装先 `winget install Microsoft.PowerShell`
 > ```powershell
 > .venv\Scripts\Activate.ps1
-> # 若被执行策略拦截，先运行一次：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> # 若被执行策略拦截，在该终端里运行一次：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 > ```
+>
+> **powershell（Windows PowerShell 5.1，系统自带）**（Windows）— 打开：Win+R 输入 `powershell` 或开始菜单「Windows PowerShell」
+> ```powershell
+> .venv\Scripts\Activate.ps1
+> # 若被执行策略拦截，在该终端里运行一次：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> 两种终端**共用同一个 `Activate.ps1` 与同一个 `.venv`**，仅入口命令不同（`pwsh` / `powershell`），可随意混用；执行策略按终端**分开记忆**，被哪个拦截就在哪个里设置一次。激活后先验证：`uvr-lite --version`。
 >
 > **cmd**（Windows）
 > ```bat

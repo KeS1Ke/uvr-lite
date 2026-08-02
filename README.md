@@ -54,7 +54,7 @@ The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUD
 ### Manual install
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat (PowerShell: .venv\Scripts\Activate.ps1)
 pip install -e .
 uvr-lite download                                    # download the model (~640 MB)
 ```
@@ -63,11 +63,19 @@ uvr-lite download                                    # download the model (~640 
 
 > **Before each use**, activate the virtual environment (the installer's activation is not persistent). Pick the command for your shell:
 >
-> **PowerShell** (Windows)
+> **pwsh (PowerShell 7+)** (Windows) — open via Win+R → `pwsh` or Start menu "PowerShell 7"; install with `winget install Microsoft.PowerShell` if missing
 > ```powershell
 > .venv\Scripts\Activate.ps1
-> # if blocked by execution policy, run once: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> # if blocked by execution policy, run once in that shell: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 > ```
+>
+> **powershell (Windows PowerShell 5.1, built-in)** (Windows) — open via Win+R → `powershell` or Start menu "Windows PowerShell"
+> ```powershell
+> .venv\Scripts\Activate.ps1
+> # if blocked by execution policy, run once in that shell: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> Both shells share the **same `Activate.ps1` and the same `.venv`** — only the entry command differs (`pwsh` vs `powershell`), so you can mix them freely. Execution policy is remembered **per shell**; set it once in whichever shell blocks you. After activating, verify with `uvr-lite --version`.
 >
 > **cmd** (Windows)
 > ```bat
