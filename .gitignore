@@ -23,6 +23,12 @@ output*/
 *.m4a
 _smoke*
 
+# graphify 知识图谱（/graphify 生成，可随时重建，不入 git）
+graphify-out/
+
+# ZCode 客户端计划产物
+.zcode/
+
 # 其他
 .DS_Store
 Thumbs.db
