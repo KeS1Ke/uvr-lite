@@ -133,6 +133,104 @@ def test_ensure_model_downloads_with_progress(fake_download_env):
     assert calls[-1] == (len(DATA), len(DATA))
 
 
+# ---------- 并行分段下载（Range server） ----------
+
+import re as _re
+
+
+class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    """支持 Range 的测试服务器（与阿里云等镜像行为一致：206 + Content-Range）。"""
+
+    def log_message(self, *args):  # noqa: N802
+        pass
+
+    def _serve(self, head_only: bool = False) -> None:
+        size = len(DATA)
+        rng = self.headers.get("Range")
+        status, body, extra = 200, DATA, {}
+        if rng:
+            m = _re.fullmatch(r"bytes=(\d+)-(\d*)", rng)
+            if m:
+                start, end = int(m.group(1)), int(m.group(2) or size - 1)
+                body = DATA[start:end + 1]
+                status = 206
+                extra["Content-Range"] = f"bytes {start}-{end}/{size}"
+        extra["Accept-Ranges"] = "bytes"
+        extra["Content-Length"] = str(len(body))
+        self.send_response(status)
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        self._serve()
+
+    def do_HEAD(self):  # noqa: N802
+        self._serve(head_only=True)
+
+
+@pytest.fixture
+def range_server(tmp_path):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def test_parallel_download_matches_single(range_server, tmp_path):
+    """并行下载结果与源数据完全一致（分段正确、合并正确）。"""
+    dest = tmp_path / "big.ckpt"
+    calls = []
+
+    def cb(done, total):
+        calls.append((done, total))
+        return True
+
+    dl._download([f"{range_server}/big.bin"], dest, progress_callback=cb)
+    assert dest.read_bytes() == DATA
+    assert calls[-1] == (len(DATA), len(DATA))
+    # 无残留段文件
+    assert not list(tmp_path.glob("*.part*"))
+
+
+def test_parallel_download_cancel_keeps_segments(range_server, tmp_path):
+    dest = tmp_path / "big.ckpt"
+    cancelled = {"n": 0}
+
+    def cb(done, total):
+        cancelled["n"] += 1
+        return done < total * 0.6
+
+    with pytest.raises(InterruptedError):
+        dl._download([f"{range_server}/big.bin"], dest, progress_callback=cb)
+    parts = list(tmp_path.glob("*.part*"))
+    assert parts, "取消后应保留段文件供续传"
+    assert sum(p.stat().st_size for p in parts) < len(DATA)
+
+
+def test_parallel_download_resume_after_cancel(range_server, tmp_path):
+    """取消后重下：已下载段跳过（续传），最终完整。"""
+    dest = tmp_path / "big.ckpt"
+
+    def cb(done, total):
+        return done < total * 0.6
+
+    with pytest.raises(InterruptedError):
+        dl._download([f"{range_server}/big.bin"], dest, progress_callback=cb)
+    dl._download([f"{range_server}/big.bin"], dest)
+    assert dest.read_bytes() == DATA
+
+
+def test_parallel_fallback_to_single_when_no_range(http_server, tmp_path):
+    """源不支持 Range（SimpleHTTPRequestHandler 返回 200）→ 单连接路径。"""
+    dest = tmp_path / "m.ckpt"
+    dl._download([f"{http_server}/model.bin"], dest)
+    assert dest.read_bytes() == DATA
+
+
 # ---------- UVR_MODEL_DIR 环境变量（安装场景：模型目录指向安装目录） ----------
 
 def test_models_dir_env_override(monkeypatch, tmp_path):
