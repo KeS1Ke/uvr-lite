@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from ..download import models_dir
 from ..models import MODEL_REGISTRY
-from .files import AUDIO_EXTS, dedup_paths, is_audio, scan_audio_files
+from .files import AUDIO_EXTS, dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
 from .worker import ModelDownloadWorker, SeparationWorker
 
@@ -50,6 +50,29 @@ MODEL_LABELS = {
 }
 DEVICE_CHOICES = ["auto", "cpu", "cuda", "mps"]
 FORMAT_CHOICES = ["auto", "flac", "wav"]
+
+# 列表项状态前缀（显示在文件名前）
+_PREFIX_PENDING = "⏳ "
+_PREFIX_OK = "✓ "
+_PREFIX_BAD = "✗ "
+
+
+class ToggleSelectList(QListWidget):
+    """点击式多选：点一次选中、再点取消，各文件互不影响（无需 Ctrl）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # SingleSelection 下 setSelected(True) 会清除其他项；Extended 互不影响
+        self.setSelectionMode(QListWidget.ExtendedSelection)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        item = self.itemAt(event.position().toPoint())
+        if item is not None:
+            item.setSelected(not item.isSelected())
+            return
+        # 点击空白：不调用 super()——Qt 默认会清空全部选择（误点风险），
+        # 多选场景保留选择更安全
+        return
 
 
 class MainWindow(QMainWindow):
@@ -93,7 +116,7 @@ class MainWindow(QMainWindow):
         # --- 文件列表 ---
         file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
         fl = QVBoxLayout(file_box)
-        self.list_files = QListWidget(file_box)
+        self.list_files = ToggleSelectList(file_box)
         fl.addWidget(self.list_files)
         btn_row = QHBoxLayout()
         self.btn_add_files = QPushButton("选择文件…", file_box)
@@ -179,10 +202,25 @@ class MainWindow(QMainWindow):
         new = dedup_paths(self._paths + paths)
         added = len(new) - len(self._paths)
         self._paths = new
+        self._rebuild_list()
+        self.label_status.setText(f"已添加 {added} 个文件，共 {len(self._paths)} 个。")
+
+    def _rebuild_list(self) -> None:
+        """按 self._paths 重建列表项（行与 _paths 一一对应，状态前缀保留基础名）。"""
         self.list_files.clear()
         for p in self._paths:
-            QListWidgetItem(p.name, self.list_files)
-        self.label_status.setText(f"已添加 {added} 个文件，共 {len(self._paths)} 个。")
+            item = QListWidgetItem(p.name, self.list_files)
+            item.setData(Qt.UserRole, str(p))
+
+    def _set_item_state(self, path: Path, prefix: str, note: str = "") -> None:
+        """更新列表中某文件的显示：prefix 为 ⏳/✓/✗，note 追加说明。"""
+        target = str(path)
+        for i in range(self.list_files.count()):
+            item = self.list_files.item(i)
+            if item.data(Qt.UserRole) == target:
+                base = Path(target).name
+                item.setText(f"{prefix}{base}{note}")
+                return
 
     def _add_files_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -207,13 +245,11 @@ class MainWindow(QMainWindow):
         rows = sorted({i.row() for i in self.list_files.selectedIndexes()}, reverse=True)
         for r in rows:
             del self._paths[r]
-        self.list_files.clear()
-        for p in self._paths:
-            QListWidgetItem(p.name, self.list_files)
+        self._rebuild_list()
 
     def _clear_list(self) -> None:
         self._paths.clear()
-        self.list_files.clear()
+        self._rebuild_list()
 
     def _choose_out_dir(self) -> None:
         start = self.edit_out.text() or str(self.settings.value("last_dir", ""))
@@ -340,6 +376,25 @@ class MainWindow(QMainWindow):
         out_dir = str(Path(out_dir).resolve())
         self._save_settings()
 
+        # 预检：先快速校验格式——无法识别为音频的文件标 ✗ 且不进队列；
+        # 内容真是音频（即使后缀被改）正常通过
+        ok_paths, bad_paths = [], []
+        for p in self._paths:
+            if precheck_audio(p):
+                ok_paths.append(p)
+            else:
+                bad_paths.append(p)
+                self._set_item_state(p, _PREFIX_BAD, "（格式不支持）")
+        if bad_paths:
+            self.label_status.setText(
+                f"{len(bad_paths)} 个文件无法识别为音频，已跳过："
+                + "、".join(p.name for p in bad_paths[:5])
+                + ("…" if len(bad_paths) > 5 else ""))
+        if not ok_paths:
+            QMessageBox.warning(self, "没有可处理的文件",
+                                "所选文件都无法识别为音频格式，请检查文件是否损坏。")
+            return
+
         params = {
             "model_name": self.combo_model.currentData(),
             "device": self.combo_device.currentText(),
@@ -349,7 +404,7 @@ class MainWindow(QMainWindow):
             "batch_size": self.spin_batch.value() or None,
             "tta": self.check_tta.isChecked(),
         }
-        self._worker = SeparationWorker(list(self._paths), out_dir, params)
+        self._worker = SeparationWorker(list(ok_paths), out_dir, params)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -366,6 +421,9 @@ class MainWindow(QMainWindow):
         self._file_times: list[float] = []
         self._failed_names: list[str] = []
         self._ok_count = 0
+        self._ok_paths = ok_paths  # 队列索引 → 文件（列表状态标记用）
+        for p in ok_paths:
+            self._set_item_state(p, _PREFIX_PENDING)
         self._set_busy(True)
         self.progress.bar.setValue(0)
         self.label_status.setText("准备中…")
@@ -390,10 +448,14 @@ class MainWindow(QMainWindow):
         self._file_times.append(time.time() - self._t_file)
         self._t_file = time.time()
         self._ok_count += 1
+        if 0 <= file_idx < len(self._ok_paths):
+            self._set_item_state(self._ok_paths[file_idx], _PREFIX_OK)
 
     def _on_file_failed(self, file_idx, error) -> None:
-        name = self._paths[file_idx].name
+        name = self._ok_paths[file_idx].name
         self._failed_names.append(name)
+        if 0 <= file_idx < len(self._ok_paths):
+            self._set_item_state(self._ok_paths[file_idx], _PREFIX_BAD)
         self.label_status.setText(f"{name} 处理失败，已跳过（{error[:80]}）")
 
     def _on_all_finished(self, ok, failed, cancelled) -> None:

@@ -12,6 +12,22 @@ def is_audio(path: Path) -> bool:
     return path.suffix.lower() in AUDIO_EXTS
 
 
+def precheck_audio(path: Path) -> bool:
+    """开始分离前的快速格式预检：读取音频头判断能否解码（不完整解码）。
+
+    与 librosa 的实际解码后端（audioread）一致——文件内容真是音频时，
+    即使后缀被改成 doc/txt 也能识别为可处理；真正的 Word 等非音频内容会被拒绝。
+    """
+    import audioread
+
+    try:
+        with audioread.audio_open(str(path)) as f:
+            _ = f.duration  # 读 header 即可，不拉取完整数据
+        return True
+    except Exception:  # noqa: BLE001 —— NoBackendError/DecodeError/OSError 等均视为不可处理
+        return False
+
+
 def scan_audio_files(folder: Path) -> List[Path]:
     """扫描文件夹下直接包含的音频文件（非递归），按名称排序。
 

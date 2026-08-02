@@ -38,3 +38,30 @@ def test_dedup_paths_preserves_order(tmp_path):
     b = tmp_path / "b.wav"
     out = dedup_paths([a, b, a, tmp_path / "a.wav"])
     assert out == [a.resolve(), b.resolve()]
+
+
+# ---------- 格式预检（开始分离前快速校验，无需完整解码） ----------
+
+def test_precheck_audio_valid_wav(tmp_path):
+    import numpy as np
+    import soundfile as sf
+
+    from uvr_lite.ui.files import precheck_audio
+
+    p = tmp_path / "song.wav"
+    sf.write(str(p), np.zeros(44100), 44100)
+    assert precheck_audio(p) is True
+
+
+def test_precheck_audio_garbage_rejected(tmp_path):
+    from uvr_lite.ui.files import precheck_audio
+
+    p = tmp_path / "fake.doc"
+    p.write_bytes(b"not audio content at all" * 100)
+    assert precheck_audio(p) is False
+
+
+def test_precheck_audio_missing_file(tmp_path):
+    from uvr_lite.ui.files import precheck_audio
+
+    assert precheck_audio(tmp_path / "nope.wav") is False
