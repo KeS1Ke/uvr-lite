@@ -68,7 +68,8 @@ if errorlevel 1 (
 echo.
 echo ============ INSTALLATION COMPLETE ============
 echo Before each use, activate the virtual environment:
-echo   .venv\Scripts\activate
+echo   PowerShell: .venv\Scripts\Activate.ps1
+echo   cmd:        .venv\Scripts\activate.bat
 echo.
 echo Usage:
 echo   uvr-lite separate song.mp3 -o output

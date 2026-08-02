@@ -61,10 +61,22 @@ uvr-lite download                                    # 下载模型（约 640 MB
 
 ## 用法
 
-> **每次使用前**先激活虚拟环境（安装脚本里的激活不跨终端生效）：
+> **每次使用前**先激活虚拟环境（安装脚本里的激活不跨终端生效）。请按你的 shell 选择命令：
 >
+> **PowerShell**（Windows）
+> ```powershell
+> .venv\Scripts\Activate.ps1
+> # 若被执行策略拦截，先运行一次：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> **cmd**（Windows）
+> ```bat
+> .venv\Scripts\activate.bat
+> ```
+>
+> **bash**（Linux / macOS）
 > ```bash
-> source .venv/bin/activate        # Windows: .venv\Scripts\activate
+> source .venv/bin/activate
 > ```
 >
 > 或直接调用完整路径：`.venv/bin/uvr-lite`（Windows: `.venv\Scripts\uvr-lite.exe`）。

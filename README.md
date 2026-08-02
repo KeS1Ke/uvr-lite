@@ -61,10 +61,22 @@ uvr-lite download                                    # download the model (~640 
 
 ## Usage
 
-> **Before each use**, activate the virtual environment (the installer's activation is not persistent):
+> **Before each use**, activate the virtual environment (the installer's activation is not persistent). Pick the command for your shell:
 >
+> **PowerShell** (Windows)
+> ```powershell
+> .venv\Scripts\Activate.ps1
+> # if blocked by execution policy, run once: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> **cmd** (Windows)
+> ```bat
+> .venv\Scripts\activate.bat
+> ```
+>
+> **bash** (Linux / macOS)
 > ```bash
-> source .venv/bin/activate        # Windows: .venv\Scripts\activate
+> source .venv/bin/activate
 > ```
 >
 > Or call the binary directly: `.venv/bin/uvr-lite` (Windows: `.venv\Scripts\uvr-lite.exe`).
