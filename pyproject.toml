@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uvr-lite"
+version = "0.1.0"
+description = "轻量级人声/伴奏分离工具：BS-RoFormer（模型与 UVR 同源）+ torch 本地推理"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "KeS1Ke" }]
+keywords = ["vocal", "separation", "karaoke", "bs-roformer", "audio"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+# torch 由安装脚本按硬件选择（CPU / CUDA），这里只声明最低版本
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.1",
+    "librosa>=0.10",
+    "soundfile>=0.12",
+    "pyyaml>=6.0",
+    "ml-collections>=0.1.1",
+    "einops>=0.7",
+    "beartype>=0.16",
+    "rotary-embedding-torch>=0.4",
+    "tqdm>=4.60",
+    "packaging>=23",
+]
+
+[project.scripts]
+uvr-lite = "uvr_lite.cli:main"
+
+[tool.setuptools]
+packages = ["uvr_lite"]
+
+[tool.setuptools.package-data]
+uvr_lite = ["configs/*.yaml"]
