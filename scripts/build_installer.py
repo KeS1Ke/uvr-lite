@@ -1,21 +1,20 @@
 # coding: utf-8
-"""把 uvr-lite 打成全量标准安装包（Inno Setup 7）。
+"""把 uvr-lite 打成半在线标准安装包（Inno Setup 7）。
 
-用法: python scripts/build_installer.py [--out dist] [--variant cpu|full]
-           [--iscc <ISCC.exe 路径>]
-产物: dist/uvr-lite-setup-{cpu|full}_v0.1.0.exe
-  - --variant cpu：只含 CPU torch（约 1GB 级；无独立显卡用户）
-  - --variant full（默认）：CPU + CUDA 双 torch（约 4GB 级）
-  - 均含：代码快照 + 内置 Python+依赖 + fp16 瘦身模型权重
-  - Inno 6+ 支持 >2GB 安装包（NSIS 有 ~2GB 硬限制，full 变体无法打包）
-发布约定: GitHub Releases 资产名固定 uvr-lite-setup-cpu.exe /
-  uvr-lite-setup-full.exe（README 的 releases/latest/download 稳定链接依赖
-  精确资产名），上传时重命名即可。
+用法: python scripts/build_installer.py [--out dist] [--iscc <ISCC.exe 路径>]
+产物: dist/uvr-lite-setup_v0.1.0.exe（约 283MB）
+  - 单包制：只内置 CPU torch（离线即装即用）；CUDA 引擎走半在线——
+    安装时勾选附加任务联网下载（install.iss 内 DownloadTemporaryFile + SHA
+    校验 + extractarchive 解压），或安装后应用内「推理引擎」区 / CLI
+    `uvr-lite install-cuda` 补装（复用多段并发 + 断点续传 + 镜像回退下载器）
+  - 含：代码快照 + 内置 Python+依赖 + CPU torch + fp16 瘦身模型权重
+  - Inno 6+ 支持 >2GB 安装包（NSIS 有 ~2GB 硬限制，历史 full 变体无法打包）
+发布约定: GitHub Releases 资产名固定 uvr-lite-setup.exe（README 的
+  releases/latest/download 稳定链接依赖精确资产名），上传时重命名即可。
 
-打包机首次打包需下载约 1GB（cpu）或 5GB（full）（绿色 Python 50MB + CPU torch
-  0.7GB + CUDA torch 3.3GB + 模型 320MB + PySide6-Essentials 等依赖），国内
-  镜像优先；下载/安装产物跨次构建复用（python/ torch_cpu/ torch_cuda/ models/
-  存在即跳过，增量更新）。
+打包机首次打包需下载约 1GB（绿色 Python 50MB + CPU torch 0.7GB + 模型
+  320MB + PySide6-Essentials 等依赖），国内镜像优先；下载/安装产物跨次
+  构建复用（python/ torch_cpu/ models/ 存在即跳过，增量更新）。
 
 前置: 本机安装 Inno Setup 7（默认探测 D:\\Inno setup / Program Files，可 --iscc 指定）
 """
@@ -36,11 +35,9 @@ sys.path.insert(0, str(ROOT))
 
 from uvr_lite import __version__  # noqa: E402 —— 版本单一来源（与 pyproject.toml 同步维护）
 
-VARIANTS = ("cpu", "full")
 
-
-def setup_name(variant: str) -> str:
-    return f"uvr-lite-setup-{variant}_v{__version__}"
+def setup_name() -> str:
+    return f"uvr-lite-setup_v{__version__}"
 
 # ---------- 固定版本与源（原 installer/consts.py） ----------
 
@@ -53,24 +50,28 @@ GREEN_PY_FILENAME = (
 )
 GREEN_PY_SHA256 = "8a0e1ded37e11f4c72b9671bf134bb478b1b2d55efe53a3d6e589b166f1bf2e1"
 GREEN_PY_URLS = [
+    # 按实测速度排序：npmmirror(512KB/0.6s) → 南大(0.7s) → GitHub 官方(0.2MB/s) → ghproxy 兜底
+    "https://registry.npmmirror.com/-/binary/python-build-standalone/"
+    f"{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
+    "https://mirror.nju.edu.cn/github-release/astral-sh/"
+    f"python-build-standalone/{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
     "https://github.com/astral-sh/python-build-standalone/releases/download/"
     f"{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
     "https://mirror.ghproxy.com/https://github.com/astral-sh/"
     f"python-build-standalone/releases/download/{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
 ]
 
-# torch：CPU 与 CUDA(cu128) 两套都打进安装包，应用内切换。
-# 国内镜像优先（阿里云 → 上海交大），官方源兜底。
+# torch：只内置 CPU 版（单包制）；CUDA 版由安装器/应用按需下载，源与 SHA
+# 统一维护在 uvr_lite/download.py（TORCH_CUDA_URLS / TORCH_CUDA_SHA256），
+# install.iss 内硬编码同款（_check_cuda_sha_consistency 防漂移）。
+# 镜像按实测速度排序（2026-08-04 流式测速）：
+#   SJTU 15-17MB/s > 官方 13-14MB/s > 阿里云 3-4MB/s（需浏览器 UA，403 已修）。
+# 南大 mirror.nju.edu.cn 无 pytorch-wheels（404），未收录。
 TORCH_VERSION = "2.7.1"
-TORCH_CUDA_INDEXES = [
-    "https://mirrors.aliyun.com/pytorch-wheels/cu128",
-    "https://mirror.sjtu.edu.cn/pytorch-wheels/cu128",
-    "https://download.pytorch.org/whl/cu128",
-]
 TORCH_CPU_INDEXES = [
-    "https://mirrors.aliyun.com/pytorch-wheels/cpu",
     "https://mirror.sjtu.edu.cn/pytorch-wheels/cpu",
     "https://download.pytorch.org/whl/cpu",
+    "https://mirrors.aliyun.com/pytorch-wheels/cpu",
 ]
 
 # 常规依赖 pip 源（清华 PyPI）
@@ -166,14 +167,40 @@ def _pip(python_exe: Path, specs: List[str], index: str = PIP_INDEX,
     raise SystemExit(f"pip 安装失败: {specs}\n{last.stderr[-500:] if last else ''}")
 
 
+def _prune_torch(dest: Path) -> None:
+    """裁剪 torch 安装目录：删编译期文件（.lib / include / bin），运行时不需要。
+
+    实测收益：torch_cuda 5.6G→4.7G（-900M）、torch_cpu 1.4G→461M（-940M），
+    import + 真实分离（CPU/GPU）验证无损。bin/ 保留 torch_shm_manager.exe
+    （torch 多进程共享内存需要；本应用单进程推理实际用不到，保守保留）。
+    """
+    t = dest / "torch"
+    for f in (t / "lib").glob("*.lib"):
+        f.unlink()
+    shutil.rmtree(t / "include", ignore_errors=True)
+    bin_dir = t / "bin"
+    if bin_dir.is_dir():
+        for f in bin_dir.iterdir():
+            if f.name == "torch_shm_manager.exe":
+                continue
+            if f.is_file():
+                f.unlink()
+            else:
+                shutil.rmtree(f, ignore_errors=True)
+    print(f"    {dest.name} 裁剪完成（.lib/include/bin 已删）")
+
+
 def _install_torch(bundle_dir: Path, tag: str, indexes: List[str]) -> Path:
     """把 torch 装到独立目录（--no-deps：依赖已在 python/ 内）。
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
     见 a7f9dff），再 pip 安装本地 wheel；目录已存在视为已就绪（跨次复用）。
+    单包制只装 torch_cpu；CUDA 引擎由安装器/应用按需下载（install.iss 与
+    uvr_lite.download.install_cuda_torch）。
     """
     dest = bundle_dir / f"torch_{tag}"
     if (dest / "torch" / "__init__.py").exists():
+        _prune_torch(dest)  # 复用路径同样裁剪（幂等）
         print(f"[4/5] torch_{tag} 已就绪，复用")
         return dest
     if dest.exists():
@@ -181,9 +208,9 @@ def _install_torch(bundle_dir: Path, tag: str, indexes: List[str]) -> Path:
     dest.mkdir(parents=True)
 
     # 绿色 Python 固定 3.12 → cp312 wheel（见 GREEN_PY_VERSION）；
-    # wheel 名内嵌构建标签：CPU 为 +cpu，CUDA 为 +cu128（不是 +cuda）
+    # 构建标签：CPU 为 +cpu（CUDA 为 +cu128，见 download.py）
     cp_tag = f"cp{GREEN_PY_VERSION.split('.')[0]}{GREEN_PY_VERSION.split('.')[1]}"
-    wheel_tag = "cu128" if tag == "cuda" else "cpu"
+    wheel_tag = "cpu" if tag == "cpu" else "cu128"
     wheel_name = f"torch-{TORCH_VERSION}+{wheel_tag}-{cp_tag}-{cp_tag}-win_amd64.whl"
     wheel_path = bundle_dir / wheel_name
     print(f"[4/5] 下载 torch_{tag}（{wheel_name}，"
@@ -192,9 +219,11 @@ def _install_torch(bundle_dir: Path, tag: str, indexes: List[str]) -> Path:
 
     dl._download([f"{idx}/{wheel_name}" for idx in indexes], wheel_path)
     print(f"[4/5] 安装 torch_{tag} 到 {dest}…")
+    # 依赖 nvidia-* 用默认清华源拉取（index="" 会走 pypi.org 官方源卡死）
     _pip(bundle_dir / "python" / "python.exe", [str(wheel_path)],
-         index="", target=dest)
+         target=dest)
     wheel_path.unlink(missing_ok=True)
+    _prune_torch(dest)
     return dest
 
 
@@ -241,11 +270,22 @@ def _smoke_ui(python_exe: Path) -> None:
     subprocess.run([str(python_exe), "-c", code], check=True, env=env)
 
 
-def prepare_bundle(bundle_dir: Path, variant: str) -> None:
-    """组装打包源：app 快照 + python(绿色 Python+依赖) + torch_cpu[/torch_cuda] + models。
+def _check_cuda_sha_consistency() -> None:
+    """install.iss 与 uvr_lite/download.py 的 CUDA wheel SHA 应一致（防漂移）。"""
+    iss = (ROOT / "installer" / "install.iss").read_text(encoding="utf-8")
+    dl_src = (ROOT / "uvr_lite" / "download.py").read_text(encoding="utf-8")
+    m_iss = re.search(r"CUDA_SHA = '([0-9a-f]{64})'", iss)
+    m_dl = re.search(r'TORCH_CUDA_SHA256 = "([0-9a-f]{64})"', dl_src)
+    if not m_iss or not m_dl or m_iss.group(1) != m_dl.group(1):
+        raise SystemExit("CUDA wheel SHA 不一致：install.iss 与 download.py 需同步修改")
+    print(f"  CUDA wheel SHA 一致: {m_dl.group(1)[:16]}…")
 
-    python/torch_*/models 下载安装产物跨次构建复用（大文件避免重下）。
-    variant="cpu" 时跳过 CUDA torch（省 3.3GB）。
+
+def prepare_bundle(bundle_dir: Path) -> None:
+    """组装打包源：app 快照 + python(绿色 Python+依赖) + torch_cpu + models。
+
+    python/torch_cpu/models 下载安装产物跨次构建复用（大文件避免重下）。
+    单包制：不内置 CUDA torch（省 3.3GB 包体，安装时按需下载）。
     """
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -281,12 +321,8 @@ def prepare_bundle(bundle_dir: Path, variant: str) -> None:
     else:
         print("[3/5] 应用依赖已就绪，复用")
 
-    # 4. 双 torch（CPU/CUDA，独立目录，应用内切换）
+    # 4. CPU torch（独立目录，应用内切换）
     _install_torch(bundle_dir, "cpu", TORCH_CPU_INDEXES)
-    if variant == "cpu":
-        print("[4/5] --variant cpu：跳过 CUDA torch（省 3.3GB）")
-    else:
-        _install_torch(bundle_dir, "cuda", TORCH_CUDA_INDEXES)
 
     # 5. 模型权重（SHA256 校验；已就绪则复用）
     os.environ["UVR_MODEL_DIR"] = str(bundle_dir / "models")
@@ -316,21 +352,20 @@ def default_iscc() -> Path:
     raise SystemExit("未找到 ISCC.exe：请安装 Inno Setup 7，或用 --iscc 指定路径")
 
 
-def build(iscc: Path, out_dir: Path, variant: str) -> Path:
+def build(iscc: Path, out_dir: Path) -> Path:
     # 输出路径与 bundle 路径均在 install.iss 内用相对路径配置
     # （相对脚本文件所在目录），避免 ISCC 对含空格路径参数的解析问题；
-    # 只传无空格的版本号与变体。Inno 6+ 支持 >2GB 安装包（full 变体约 4GB，
-    # NSIS 有 ~2GB 硬限制无法打包）。
+    # 只传无空格的版本号。半在线单包约 283MB（Inno 6+ 支持 >2GB 安装包）。
     out_dir.mkdir(parents=True, exist_ok=True)
+    _check_cuda_sha_consistency()
     cmd = [
         str(iscc),
         f"/DMyAppVersion={__version__}",
-        f"/DVariant={variant}",
         str(ROOT / "installer" / "install.iss"),
     ]
-    print(f"[5/5] ISCC 编译中（--variant {variant}，压缩需较长时间）…")
+    print(f"[5/5] ISCC 编译中（压缩需较长时间）…")
     subprocess.run(cmd, check=True)
-    exe = out_dir / f"{setup_name(variant)}.exe"
+    exe = out_dir / f"{setup_name()}.exe"
     if not exe.exists():
         raise SystemExit(f"打包失败：未找到产物 {exe}")
     print(f"完成: {exe}（{exe.stat().st_size / 1e6:.0f} MB）")
@@ -338,10 +373,8 @@ def build(iscc: Path, out_dir: Path, variant: str) -> Path:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="打包 uvr-lite 为全量标准安装包（Inno Setup 7）")
+    ap = argparse.ArgumentParser(description="打包 uvr-lite 为半在线标准安装包（Inno Setup 7）")
     ap.add_argument("--out", default=str(ROOT / "dist"))
-    ap.add_argument("--variant", choices=VARIANTS, default="full",
-                    help="cpu=仅 CPU torch；full=CPU+CUDA 双 torch（默认）")
     ap.add_argument("--iscc", default="", help="ISCC.exe 路径（默认自动探测）")
     ap.add_argument("--no-bundle", action="store_true",
                     help="跳过 bundle 准备（仅重新编译 .iss）")
@@ -349,10 +382,10 @@ def main() -> int:
     out_dir = Path(args.out).resolve()
     bundle_dir = out_dir / "_bundle"
     iscc = Path(args.iscc).resolve() if args.iscc else default_iscc()
-    print(f"ISCC: {iscc} | variant: {args.variant}")
+    print(f"ISCC: {iscc}")
     if not args.no_bundle:
-        prepare_bundle(bundle_dir, args.variant)
-    build(iscc, out_dir, args.variant)
+        prepare_bundle(bundle_dir)
+    build(iscc, out_dir)
     return 0
 
 
