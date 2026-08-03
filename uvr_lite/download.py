@@ -9,8 +9,10 @@
 
 import hashlib
 import os
+import shutil
 import socket
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,9 +20,13 @@ from typing import Callable, List, Optional
 
 from tqdm.auto import tqdm
 
+from . import _base_dir  # noqa: E402 —— 根目录定位（dev/安装两布局）
 from .models import MODEL_REGISTRY, get_model_info
 
-UA = "uvr-lite/0.1"
+# 浏览器 UA：阿里云 pytorch-wheels 等镜像对非浏览器 UA 返回 403（曾实测），
+# GitHub/镜像站对默认 UA 也可能限速。
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 # tqdm 仅用于终端进度条装饰；安装链环境（绿色 Python）可能没有它，
 # 下载逻辑本身走 progress_callback，无 tqdm 时静默降级。
@@ -31,13 +37,12 @@ except ImportError:  # noqa: BLE001
 
 
 def repo_root() -> Path:
-    """仓库/安装根目录。
+    """仓库/安装根目录（models/ 与 torch_cpu/ 等所在层）。
 
-    开发场景: {repo}/uvr_lite/download.py → parents[2] = {repo}
-    安装场景: {inst}/app/uvr_lite/download.py → parents[2] = {inst}
-    （models/ 与 torch_cpu/ 等位于该层；与 __init__._base_dir 的定位一致）
+    与 __init__._base_dir 同一语义（dev {repo} 与安装 {inst} 层级不同，
+    按目录特征判定，见 _base_dir 注释）。
     """
-    return Path(__file__).resolve().parents[2]
+    return _base_dir()
 
 
 def models_dir() -> Path:
@@ -322,6 +327,121 @@ def ensure_model(name: str, force: bool = False,
 def download_all() -> None:
     for name in MODEL_REGISTRY:
         ensure_model(name)
+
+
+# ---------- CUDA 推理引擎（torch 二进制）下载 ----------
+# 单包安装只含 CPU torch；CUDA 引擎由用户应用内/CLI 额外下载（半在线模式，
+# 与 UVR 官方同策略）。wheel 自包含全部 CUDA 运行库（torch/lib 内 16 个
+# cudnn/cublas/cufft DLL，无独立 nvidia-* 包，解压即用）。
+# 镜像按实测速度排序（2026-08-04）：SJTU 15-17MB/s > 官方 13-14MB/s >
+# 阿里云 3-4MB/s（需浏览器 UA，403 已修）；南大无 pytorch-wheels（404）。
+# SHA256 于打包时下载一次算得（2bb8c05d…，3273024349 字节）。
+TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
+TORCH_CUDA_SHA256 = "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30"
+TORCH_CUDA_URLS = [
+    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL}",
+    f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL}",
+    f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL}",
+]
+
+
+def _wheel_cache_dir() -> Path:
+    """wheel 中转目录（系统临时目录；.part 断点续传文件同处）。"""
+    d = Path(tempfile.gettempdir()) / "uvr-lite"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cuda_torch_installed(base: Optional[Path] = None) -> bool:
+    """CUDA 引擎是否已安装（{base}/torch_cuda/torch/__init__.py 存在）。"""
+    base = Path(base) if base else repo_root()
+    return (base / "torch_cuda" / "torch" / "__init__.py").exists()
+
+
+def _prune_torch_install(dest: Path) -> None:
+    """裁剪 torch 目录：删编译期 .lib / include / bin（运行时不需要）。
+
+    与打包脚本 build_installer._prune_torch 同款；实测 torch_cuda
+    5.6G→4.7G（-900M），import + 真实分离（CPU/GPU）验证无损。
+    bin/ 保留 torch_shm_manager.exe（torch 多进程共享内存需要）。
+    """
+    t = dest / "torch"
+    for f in (t / "lib").glob("*.lib"):
+        f.unlink()
+    shutil.rmtree(t / "include", ignore_errors=True)
+    bin_dir = t / "bin"
+    if bin_dir.is_dir():
+        for f in bin_dir.iterdir():
+            if f.name == "torch_shm_manager.exe":
+                continue
+            if f.is_file():
+                f.unlink()
+            else:
+                shutil.rmtree(f, ignore_errors=True)
+
+
+def install_cuda_torch(base: Optional[Path] = None,
+                       progress_callback: Optional[Callable[[int, int], bool]] = None) -> Path:
+    """下载并安装 CUDA 推理引擎到 {base}/torch_cuda（与应用同目录）。
+
+    流程：已安装则直接返回 → _download（多段并发 + 断点续传 + 镜像回退）
+    → SHA256 校验（不匹配删缓存并报错）→ zipfile 解压（压缩字节进度，
+    与下载阶段同尺度，进度条不回跳）→ 裁剪 .lib/include/bin。
+
+    progress_callback(done, total) 字节语义贯穿下载与解压阶段；返回 False
+    视为取消（抛 InterruptedError；wheel 缓存保留，下次直接从解压开始）。
+    """
+    base = Path(base) if base else repo_root()
+    dest = base / "torch_cuda"
+    if cuda_torch_installed(base):
+        print(f"CUDA 引擎已就绪: {dest}")
+        return dest
+
+    wheel = _wheel_cache_dir() / TORCH_CUDA_WHEEL
+    print(f"下载 CUDA 推理引擎（{TORCH_CUDA_WHEEL}，约 3.3 GB，多段并行 + 镜像回退）…")
+    download_total = 0
+
+    def _track_download(done: int, total: int) -> bool:
+        """记录下载阶段总字节（解压阶段进度接续用，避免进度条回跳）。"""
+        nonlocal download_total
+        download_total = total
+        return True if progress_callback is None else progress_callback(done, total)
+
+    _download(TORCH_CUDA_URLS, wheel, _track_download)
+    actual = sha256_of(wheel)
+    if actual != TORCH_CUDA_SHA256:
+        wheel.unlink(missing_ok=True)
+        wheel.with_suffix(wheel.suffix + ".part").unlink(missing_ok=True)
+        raise RuntimeError(
+            f"SHA256 校验失败: 期望 {TORCH_CUDA_SHA256[:16]}…，实际 {actual[:16]}…。"
+            f"下载源可能已变更，请稍后重试")
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+
+    # 手动迭代解压（extractall 无进度回调；3.3GB 解压约 1-2 分钟需可见进度）。
+    # 进度按压缩字节累计并接续下载阶段（同一 total 尺度，进度条连续不回跳）。
+    import zipfile
+
+    offset = download_total
+    with zipfile.ZipFile(wheel) as zf:
+        total = offset + sum(i.compress_size for i in zf.infolist())
+        done = last_report = offset
+        for info in zf.infolist():
+            zf.extract(info, dest)
+            done += info.compress_size
+            if progress_callback is not None and done - last_report >= _REPORT_INTERVAL:
+                last_report = done
+                if not progress_callback(done, total):
+                    raise InterruptedError("解压已取消")
+        if progress_callback is not None and last_report < total:
+            progress_callback(total, total)
+    wheel.unlink(missing_ok=True)
+
+    _prune_torch_install(dest)
+    print(f"完成: {dest}（CUDA 引擎已安装，重启应用后生效）")
+    return dest
 
 
 if __name__ == "__main__":

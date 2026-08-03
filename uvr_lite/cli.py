@@ -41,6 +41,29 @@ def _cmd_download(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_install_cuda(args: argparse.Namespace) -> int:
+    """下载并安装 CUDA 推理引擎（终端进度条，断点续传 + 镜像回退）。"""
+    from .download import install_cuda_torch
+    from tqdm.auto import tqdm
+
+    bar = {}
+
+    def cb(done: int, total: int) -> bool:
+        if "bar" not in bar:
+            bar["bar"] = tqdm(total=total, unit="B", unit_scale=True,
+                              desc="CUDA 引擎", miniters=1)
+        bar["bar"].update(done - bar["bar"].n)
+        return True
+
+    try:
+        install_cuda_torch(progress_callback=cb)
+    finally:
+        if "bar" in bar:
+            bar["bar"].close()
+    print("设备选择 cuda（或 auto）即可使用 GPU 加速。")
+    return 0
+
+
 def _cmd_models(args: argparse.Namespace) -> int:
     print(f"{'名称':<20} {'类型':<18} 状态")
     print("-" * 64)
@@ -91,6 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ls = sub.add_parser("models", help="列出可用模型与下载状态")
     p_ls.set_defaults(func=_cmd_models)
+
+    p_cuda = sub.add_parser("install-cuda",
+                            help="下载并安装 CUDA 推理引擎（GPU 加速，约 3.3 GB，断点续传）")
+    p_cuda.set_defaults(func=_cmd_install_cuda)
 
     p_ui = sub.add_parser("ui", help="启动桌面界面（需 pip install -e '.[ui]'）")
     p_ui.set_defaults(func=_cmd_ui)

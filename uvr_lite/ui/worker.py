@@ -112,6 +112,40 @@ class ModelDownloadWorker(QObject):
         return not self._cancel
 
 
+class CudaTorchWorker(QObject):
+    """CUDA 推理引擎下载安装任务（复用 install_cuda_torch：断点续传 + 镜像回退 + SHA256）。
+
+    进度回调贯穿下载与解压阶段（累计尺度单调递增，进度条不回跳）；可取消
+    （wheel 缓存保留，下次直接从解压开始）。
+    """
+
+    progress = Signal(int, int)   # done_bytes, total_bytes（下载+解压总量）
+    finished = Signal(bool, str)  # 是否成功, 错误/取消信息
+
+    def __init__(self, base: Path):
+        super().__init__()
+        self.base = Path(base)
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        try:
+            from ..download import install_cuda_torch
+
+            install_cuda_torch(self.base, progress_callback=self._cb)
+            self.finished.emit(True, "")
+        except InterruptedError:
+            self.finished.emit(False, "已取消（断点续传，可随时重新下载）")
+        except Exception as e:  # noqa: BLE001
+            self.finished.emit(False, str(e))
+
+    def _cb(self, done: int, total: int) -> bool:
+        self.progress.emit(done, total)
+        return not self._cancel
+
+
 def friendly_error(e: Exception) -> str:
     """把异常转成非专业用户可读的中文信息。"""
     from audioread.exceptions import NoBackendError

@@ -34,11 +34,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..download import models_dir
+from ..download import cuda_torch_installed, models_dir, repo_root
 from ..models import MODEL_REGISTRY
 from .files import AUDIO_EXTS, dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
-from .worker import ModelDownloadWorker, SeparationWorker
+from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
 
@@ -165,6 +165,22 @@ class MainWindow(QMainWindow):
         form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
         form.addRow("", self.check_tta)
         root.addWidget(param_box)
+
+        # --- 推理引擎（CPU/CUDA torch）：单包只含 CPU，CUDA 可选下载 ---
+        engine_box = QGroupBox("推理引擎", central)
+        engine_row = QHBoxLayout(engine_box)
+        self.label_engine = QLabel(engine_box)
+        self.cuda_progress = QProgressBar(engine_box)
+        self.cuda_progress.setFixedWidth(180)
+        self.cuda_progress.setVisible(False)
+        self.btn_cuda = QPushButton(engine_box)
+        engine_row.addWidget(self.label_engine)
+        engine_row.addWidget(self.cuda_progress)
+        engine_row.addWidget(self.btn_cuda)
+        engine_row.addStretch(1)
+        root.addWidget(engine_box)
+        self.btn_cuda.clicked.connect(self._start_cuda_download)
+        self._refresh_engine_status()
 
         # --- 输出目录 ---
         out_box = QGroupBox("输出文件夹", central)
@@ -384,6 +400,65 @@ class MainWindow(QMainWindow):
             self.banner.setVisible(True)
             self.label_banner.setText(f"模型下载未完成：{error}（点击重试）")
 
+    # ---------- CUDA 引擎下载 ----------
+
+    def _refresh_engine_status(self) -> None:
+        """按安装状态刷新「推理引擎」区：已装 / 可下载。"""
+        if cuda_torch_installed():
+            self.label_engine.setText("CUDA 引擎已安装 ✓（设备选「自动」将优先 GPU 加速）")
+            self.btn_cuda.setText("已安装")
+            self.btn_cuda.setEnabled(False)
+        else:
+            self.label_engine.setText("CUDA 引擎未安装 — 下载约 3.3 GB 后可用 GPU 加速（NVIDIA 显卡）")
+            self.btn_cuda.setText("下载 CUDA 引擎")
+            self.btn_cuda.setEnabled(True)
+
+    def _start_cuda_download(self) -> None:
+        self._cuda_worker = CudaTorchWorker(repo_root())
+        self._cuda_thread = QThread(self)
+        self._cuda_worker.moveToThread(self._cuda_thread)
+        self._cuda_thread.started.connect(self._cuda_worker.run)
+        self._cuda_worker.progress.connect(self._on_cuda_progress)
+        self._cuda_worker.finished.connect(self._on_cuda_finished)
+        self._cuda_thread.finished.connect(self._cuda_thread.deleteLater)
+        self._cuda_thread.finished.connect(self._cuda_worker.deleteLater)
+
+        self.btn_cuda.setText("取消下载")
+        self.btn_cuda.clicked.disconnect()
+        self.btn_cuda.clicked.connect(self._cancel_cuda_download)
+        self.cuda_progress.setVisible(True)
+        self.cuda_progress.setValue(0)
+        self.label_engine.setText("正在下载 CUDA 引擎…（可取消，断点续传）")
+        self._cuda_thread.start()
+
+    def _cancel_cuda_download(self) -> None:
+        if self._cuda_worker is not None:
+            self._cuda_worker.cancel()
+            self.btn_cuda.setEnabled(False)
+            self.label_engine.setText("正在取消…")
+
+    def _on_cuda_progress(self, done, total) -> None:
+        pct = int(done / total * 100) if total else 0
+        self.cuda_progress.setValue(pct)
+        self.label_engine.setText(
+            f"CUDA 引擎安装中… {pct}%（下载 + 解压，可取消）")
+
+    def _on_cuda_finished(self, ok, error) -> None:
+        self._cuda_thread.quit()
+        self._cuda_thread.wait(3000)
+        self.cuda_progress.setVisible(False)
+        self.btn_cuda.setEnabled(True)
+        self.btn_cuda.setText("下载 CUDA 引擎")
+        self.btn_cuda.clicked.disconnect()
+        self.btn_cuda.clicked.connect(self._start_cuda_download)
+        self._refresh_engine_status()
+        if ok:
+            QMessageBox.information(
+                self, "CUDA 引擎已安装",
+                "CUDA 引擎安装完成。重启 uvr-lite 后，设备选择「自动」将优先使用 GPU 加速。")
+        else:
+            self.label_engine.setText(f"CUDA 引擎下载未完成：{error}（点击重试）")
+
     # ---------- 任务控制 ----------
 
     def _start_clicked(self) -> None:
@@ -529,6 +604,11 @@ class MainWindow(QMainWindow):
                 self._dl_worker.cancel()
             self._dl_thread.quit()
             self._dl_thread.wait(3000)
+        if getattr(self, "_cuda_thread", None) is not None and self._cuda_thread.isRunning():
+            if getattr(self, "_cuda_worker", None) is not None:
+                self._cuda_worker.cancel()
+            self._cuda_thread.quit()
+            self._cuda_thread.wait(3000)
         super().closeEvent(event)
 
 
