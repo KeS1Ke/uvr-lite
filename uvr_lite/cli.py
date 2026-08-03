@@ -2,23 +2,32 @@
 """命令行入口：uvr-lite separate / download / models / version。"""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from . import __version__
 from .download import ensure_model, models_dir
-from .engine import separate_file
 from .models import MODEL_REGISTRY, DEFAULT_MODEL
 
 
 def _cmd_separate(args: argparse.Namespace) -> int:
     pcm = f"PCM_{args.pcm}"
+    # 全量安装包含 CPU/CUDA 两套 torch：--device 指定二进制，必须在
+    # engine（import torch）之前切换（惰性 import）
+    if args.device in ("cuda", "cpu"):
+        from . import set_torch_mode
+
+        set_torch_mode(args.device)
+    from .engine import Separator
+
+    # 会话复用：模型只加载一次，全部输入文件共用（避免每文件重载 640MB ckpt）
+    sep = Separator(model_name=args.model, device=args.device,
+                    batch_size=args.batch_size, num_overlap=args.num_overlap)
     for inp in args.input:
-        separate_file(
-            inp, args.out,
-            model_name=args.model, pcm=pcm, device=args.device,
+        sep.separate(
+            inp, args.out, pcm=pcm,
             fmt=args.format, bigshifts=args.bigshifts, tta=args.tta,
-            batch_size=args.batch_size,
         )
     return 0
 
@@ -67,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="圆形时移平均次数（>1 提升质量但线性增耗时，默认 1）")
     p_sep.add_argument("--batch-size", type=int, default=None,
                        help="推理批大小（默认取模型配置；低显存 GPU 可设 1 防 OOM）")
+    p_sep.add_argument("--num-overlap", type=int, default=None,
+                       help="重叠窗口数（质量/速度开关：1 最快约 2x，2 默认，更大更慢更稳）")
     p_sep.add_argument("--tta", action="store_true",
                        help="测试时增强（极性/声道反转平均，三倍耗时，默认关）")
     p_sep.set_defaults(func=_cmd_separate)

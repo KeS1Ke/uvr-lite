@@ -48,7 +48,8 @@ MODEL_LABELS = {
     "bs_roformer_ep317": "BS-RoFormer ep317（主力，推荐）",
     "mel_band_karaoke": "Mel-Band RoFormer Karaoke（备选）",
 }
-DEVICE_CHOICES = ["auto", "cpu", "cuda", "mps"]
+# 全量安装包含 CPU/CUDA 两套 torch，应用内选择；mps 仅 macOS 无意义故不列出
+DEVICE_CHOICES = ["auto", "cpu", "cuda"]
 FORMAT_CHOICES = ["auto", "flac", "wav"]
 
 # 列表项状态前缀（显示在文件名前）
@@ -141,6 +142,7 @@ class MainWindow(QMainWindow):
             self.combo_model.addItem(MODEL_LABELS.get(name, name), name)
         self.combo_device = QComboBox(param_box)
         self.combo_device.addItems(DEVICE_CHOICES)
+        self.combo_device.currentIndexChanged.connect(self._on_device_changed)
         self.combo_format = QComboBox(param_box)
         self.combo_format.addItems(FORMAT_CHOICES)
         self.combo_pcm = QComboBox(param_box)
@@ -150,6 +152,9 @@ class MainWindow(QMainWindow):
         self.spin_batch = QSpinBox(param_box)
         self.spin_batch.setRange(0, 64)
         self.spin_batch.setSpecialValueText("默认（模型配置）")
+        self.spin_overlap = QSpinBox(param_box)
+        self.spin_overlap.setRange(0, 8)
+        self.spin_overlap.setSpecialValueText("默认（模型配置）")
         self.check_tta = QCheckBox("测试时增强（3 倍耗时，质量更好）", param_box)
         form.addRow("模型", self.combo_model)
         form.addRow("设备", self.combo_device)
@@ -157,6 +162,7 @@ class MainWindow(QMainWindow):
         form.addRow("FLAC 位深", self.combo_pcm)
         form.addRow("BigShifts 次数", self.spin_bigshifts)
         form.addRow("批大小（低显存设 1）", self.spin_batch)
+        form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
         form.addRow("", self.check_tta)
         root.addWidget(param_box)
 
@@ -278,6 +284,7 @@ class MainWindow(QMainWindow):
         self._select_data(self.combo_pcm, str(s.value("pcm", "24")))
         self.spin_bigshifts.setValue(int(s.value("bigshifts", 1)))
         self.spin_batch.setValue(int(s.value("batch_size", 0)))
+        self.spin_overlap.setValue(int(s.value("num_overlap", 0)))
         self.check_tta.setChecked(bool(s.value("tta", False)))
         out = s.value("out_dir", "")
         if out:
@@ -291,6 +298,7 @@ class MainWindow(QMainWindow):
         s.setValue("pcm", self.combo_pcm.currentText())
         s.setValue("bigshifts", self.spin_bigshifts.value())
         s.setValue("batch_size", self.spin_batch.value())
+        s.setValue("num_overlap", self.spin_overlap.value())
         s.setValue("tta", self.check_tta.isChecked())
         s.setValue("out_dir", self.edit_out.text())
 
@@ -302,6 +310,23 @@ class MainWindow(QMainWindow):
             idx = combo.findText(str(value))
         if idx >= 0:
             combo.setCurrentIndex(idx)
+
+    # ---------- 推理引擎（torch 二进制）切换 ----------
+
+    def _on_device_changed(self) -> None:
+        """设备选择 → 写 torch.ini（启动时据此加载 CPU/CUDA 版 torch）。
+
+        仅安装场景（{app}/torch_cpu|torch_cuda 存在）生效；开发场景忽略。
+        切换在下次启动时生效（torch 已在进程内加载）。
+        """
+        base = Path(__file__).resolve().parents[2]
+        if (base / "torch_cpu").exists() or (base / "torch_cuda").exists():
+            try:
+                (base / "torch.ini").write_text(
+                    f"use={self.combo_device.currentText()}\n", encoding="utf-8")
+            except OSError:
+                return
+            self.label_status.setText("推理引擎已切换，重启 uvr-lite 后生效。")
 
     # ---------- 模型下载 ----------
 
@@ -402,6 +427,7 @@ class MainWindow(QMainWindow):
             "pcm": f"PCM_{self.combo_pcm.currentText()}",
             "bigshifts": self.spin_bigshifts.value(),
             "batch_size": self.spin_batch.value() or None,
+            "num_overlap": self.spin_overlap.value() or None,
             "tta": self.check_tta.isChecked(),
         }
         self._worker = SeparationWorker(list(ok_paths), out_dir, params)
@@ -482,7 +508,7 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
                   self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
-                  self.spin_bigshifts, self.spin_batch, self.check_tta,
+                  self.spin_bigshifts, self.spin_batch, self.spin_overlap, self.check_tta,
                   self.edit_out, self.btn_out):
             w.setEnabled(not busy)
         self.btn_start.setEnabled(not busy)
