@@ -178,11 +178,9 @@ class Separator:
                   f" | 采样率: {self.sample_rate}")
 
         _cb("decode", 0, 1)
-        mix = _load_audio(input_path, self.sample_rate)
-        if len(mix.shape) == 1:
-            mix = np.expand_dims(mix, axis=0)
-            if getattr(self.config.audio, "num_channels", 1) == 2:
-                mix = np.concatenate([mix, mix], axis=0)
+        mix = _load_audio(input_path, self.sample_rate)  # (channels, samples)，恒为 2D
+        if mix.shape[0] == 1 and getattr(self.config.audio, "num_channels", 1) == 2:
+            mix = np.concatenate([mix, mix], axis=0)  # mono 输入按 stereo 模型复制双声道
         _cb("decode", 1, 1)
 
         mix_orig = mix.copy()

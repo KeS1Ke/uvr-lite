@@ -142,6 +142,26 @@ def test_no_callback_backward_compatible(tmp_path):
     assert len(written) == 2 and all(Path(p).exists() for p in written)
 
 
+def test_mono_input_upmixed_to_stereo(tmp_path, monkeypatch):
+    """mono 输入 + stereo 模型（num_channels=2）：_load_audio 恒返回 2D
+    (channels, samples)，引擎必须按 channels==1 复制双声道，否则模型
+    stereo 断言崩溃（回归：旧代码用 len(shape)==1 判断，永不触发）。"""
+    seen = {}
+
+    def spy_bigshifts(config, model, mix, *a, **k):
+        seen["channels"] = mix.shape[0]
+        return {"vocals": np.asarray(mix, dtype=float)}
+
+    monkeypatch.setattr(engine_mod, "bigshifts_wrapper", spy_bigshifts)
+    song = tmp_path / "mono.wav"
+    t = np.linspace(0, 0.3, int(0.3 * 44100), endpoint=False)
+    sf.write(song, 0.5 * np.sin(2 * np.pi * 440 * t), 44100)  # 1D = mono
+
+    written = separate_file(str(song), str(tmp_path / "out"))
+    assert seen["channels"] == 2
+    assert len(written) == 2 and all(Path(p).exists() for p in written)
+
+
 def test_separator_reuses_model_across_files(tmp_path, monkeypatch):
     """会话复用：一个 Separator 处理多文件时，模型只加载一次。"""
     song1 = make_wav(tmp_path / "a.wav")
