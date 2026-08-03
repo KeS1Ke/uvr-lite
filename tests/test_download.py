@@ -133,6 +133,42 @@ def test_ensure_model_downloads_with_progress(fake_download_env):
     assert calls[-1] == (len(DATA), len(DATA))
 
 
+# ---------- 校验缓存（.verified 标记） ----------
+
+def test_ensure_model_marks_verified(fake_download_env):
+    """首次校验通过后生成标记。"""
+    (fake_download_env / "test_model.ckpt").write_bytes(DATA)
+    dl.ensure_model("test_model")
+    assert dl._verified_marker(fake_download_env / "test_model.ckpt").exists()
+
+
+def test_ensure_model_verified_marker_skips_hash(fake_download_env, monkeypatch):
+    """标记命中（size+mtime 未变）→ 跳过全量 SHA256（640MB 读盘成本）。"""
+    ckpt = fake_download_env / "test_model.ckpt"
+    ckpt.write_bytes(DATA)
+    dl.ensure_model("test_model")  # 首次：全量校验 + 写标记
+    hashed = {"n": 0}
+    real_sha = dl.sha256_of
+
+    def counting_sha(path):
+        hashed["n"] += 1
+        return real_sha(path)
+
+    monkeypatch.setattr(dl, "sha256_of", counting_sha)
+    dl.ensure_model("test_model")
+    assert hashed["n"] == 0, "标记命中后不应再读文件全量哈希"
+
+
+def test_ensure_model_changed_file_revalidates(fake_download_env):
+    """文件被替换（size/mtime 变化）→ 标记失效，重新校验并下载。"""
+    ckpt = fake_download_env / "test_model.ckpt"
+    ckpt.write_bytes(DATA)
+    dl.ensure_model("test_model")
+    ckpt.write_bytes(b"corrupt")
+    dl.ensure_model("test_model")
+    assert ckpt.read_bytes() == DATA, "内容变更应触发重新下载"
+
+
 # ---------- 并行分段下载（Range server） ----------
 
 import re as _re

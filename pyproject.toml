@@ -21,8 +21,9 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "torch>=2.1",
-    "librosa>=0.10",
     "soundfile>=0.12",
+    "soxr>=0.3",
+    "audioread>=3.0",
     "pyyaml>=6.0",
     "ml-collections>=0.1.1",
     "einops>=0.7",
@@ -36,7 +37,7 @@ dependencies = [
 uvr-lite = "uvr_lite.cli:main"
 
 [project.optional-dependencies]
-ui = ["PySide6>=6.6"]
+ui = ["PySide6-Essentials>=6.6"]
 
 [tool.setuptools]
 packages = ["uvr_lite", "uvr_lite.ui"]

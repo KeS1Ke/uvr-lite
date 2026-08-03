@@ -15,18 +15,22 @@ def qapp():
 
 
 def _run_two_files(monkeypatch, files, params):
-    """mock separate_file 按文件序号回调：文件 1 完整序列，文件 2 重复同序列。"""
+    """mock Separator 按文件序号回调：文件 1 完整序列，文件 2 重复同序列。"""
     seq = [("decode", 0, 1), ("decode", 1, 1),
            ("chunk", 0, 100), ("chunk", 50, 100), ("chunk", 100, 100),
            ("infer", 1, 1),
            ("write", 1, 2), ("write", 2, 2)]
 
-    def fake_separate(path, out_dir, progress_callback=None, **kw):
-        for phase, done, total in seq:
-            assert progress_callback(phase, done, total) is True
-        return [path]
+    class FakeSeparator:
+        def __init__(self, **kw):
+            pass
 
-    monkeypatch.setattr(worker, "separate_file", fake_separate)
+        def separate(self, path, out_dir, progress_callback=None, **kw):
+            for phase, done, total in seq:
+                assert progress_callback(phase, done, total) is True
+            return [path]
+
+    monkeypatch.setattr(worker, "Separator", FakeSeparator)
     w = SeparationWorker(files, "out", params)
     progress = []
     w.progress.connect(lambda ph, d, t, idx, ftot, pct: progress.append((idx, ph, pct)))

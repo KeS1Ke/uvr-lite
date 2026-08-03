@@ -17,7 +17,7 @@ from rotary_embedding_torch import RotaryEmbedding
 from einops import rearrange, pack, unpack, reduce, repeat
 from einops.layers.torch import Rearrange
 
-from librosa import filters
+from .mel_filters import mel  # vendored librosa.filters.mel（去 librosa 依赖）
 
 
 # helper functions
@@ -517,7 +517,7 @@ class MelBandConformer(Module):
 
         freqs = stft_n_fft // 2 + 1
 
-        mel_filter_bank_numpy = filters.mel(sr=sample_rate, n_fft=stft_n_fft, n_mels=num_bands)
+        mel_filter_bank_numpy = mel(sr=sample_rate, n_fft=stft_n_fft, n_mels=num_bands)
         mel_filter_bank = torch.from_numpy(mel_filter_bank_numpy)
 
         mel_filter_bank[0, 0] = mel_filter_bank[0, 1] * 0.25

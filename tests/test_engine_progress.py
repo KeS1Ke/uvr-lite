@@ -142,6 +142,26 @@ def test_no_callback_backward_compatible(tmp_path):
     assert len(written) == 2 and all(Path(p).exists() for p in written)
 
 
+def test_separator_reuses_model_across_files(tmp_path, monkeypatch):
+    """会话复用：一个 Separator 处理多文件时，模型只加载一次。"""
+    song1 = make_wav(tmp_path / "a.wav")
+    song2 = make_wav(tmp_path / "b.wav")
+    loads = []
+    real_load = engine_mod.load_model  # fixture 已换成 fake，包装计数即可
+
+    def counting_load_model(model_name, ckpt_path, device):
+        loads.append(model_name)
+        return real_load(model_name, ckpt_path, device)
+
+    monkeypatch.setattr(engine_mod, "load_model", counting_load_model)
+    from uvr_lite.engine import Separator
+
+    sep = Separator(verbose=False)
+    sep.separate(str(song1), str(tmp_path / "out"))
+    sep.separate(str(song2), str(tmp_path / "out"))
+    assert len(loads) == 1, "两个文件应共用一次模型加载（实际 %d 次）" % len(loads)
+
+
 def test_tta_phase_reported(tmp_path):
     song = make_wav(tmp_path / "song.wav")
     phases = []

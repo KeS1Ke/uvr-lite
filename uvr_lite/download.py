@@ -22,10 +22,22 @@ from .models import MODEL_REGISTRY, get_model_info
 
 UA = "uvr-lite/0.1"
 
+# tqdm 仅用于终端进度条装饰；安装链环境（绿色 Python）可能没有它，
+# 下载逻辑本身走 progress_callback，无 tqdm 时静默降级。
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # noqa: BLE001
+    tqdm = None
+
 
 def repo_root() -> Path:
-    """仓库根目录（uvr_lite 包所在目录的上一级）"""
-    return Path(__file__).resolve().parent.parent
+    """仓库/安装根目录。
+
+    开发场景: {repo}/uvr_lite/download.py → parents[2] = {repo}
+    安装场景: {inst}/app/uvr_lite/download.py → parents[2] = {inst}
+    （models/ 与 torch_cpu/ 等位于该层；与 __init__._base_dir 的定位一致）
+    """
+    return Path(__file__).resolve().parents[2]
 
 
 def models_dir() -> Path:
@@ -49,6 +61,32 @@ def sha256_of(path: Path) -> str:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ---------- 校验缓存 ----------
+# 权重文件 640MB，每轮运行全量 SHA256 约 1s+；用 {ckpt}.verified 标记记录
+# (size, mtime_ns)，文件未变则跳过全量哈希。标记丢失/文件变更时重新校验。
+
+def _verified_marker(ckpt: Path) -> Path:
+    return ckpt.with_name(ckpt.name + ".verified")
+
+
+def _check_verified(ckpt: Path) -> bool:
+    """标记记录的 (size, mtime_ns) 与当前文件一致 → 视为已验证。"""
+    marker = _verified_marker(ckpt)
+    try:
+        st = ckpt.stat()
+        return marker.read_text(encoding="utf-8").strip() == f"{st.st_size}:{st.st_mtime_ns}"
+    except (OSError, ValueError):
+        return False
+
+
+def _mark_verified(ckpt: Path) -> None:
+    try:
+        st = ckpt.stat()
+        _verified_marker(ckpt).write_text(f"{st.st_size}:{st.st_mtime_ns}", encoding="utf-8")
+    except OSError:  # noqa: BLE001 —— 标记写失败只影响下次全量校验，不阻塞
+        pass
 
 
 def _download_single(url: str, tmp: Path,
@@ -80,15 +118,21 @@ def _download_single(url: str, tmp: Path,
     total = existing + remaining if resume else remaining
 
     mode = "ab" if resume else "wb"
-    with open(tmp, mode) as f, tqdm(
-        initial=existing, total=total, unit="B", unit_scale=True,
-        desc=f"下载 {tmp.name[:-5]}", miniters=1,
-    ) as bar:
-        while chunk := resp.read(1 << 20):
-            f.write(chunk)
-            bar.update(len(chunk))
-            if progress_callback is not None and not progress_callback(existing + bar.n, total):
-                raise InterruptedError("下载已取消")
+    bar = None
+    if tqdm is not None:
+        bar = tqdm(initial=existing, total=total, unit="B", unit_scale=True,
+                   desc=f"下载 {tmp.name[:-5]}", miniters=1)
+    try:
+        with open(tmp, mode) as f:
+            while chunk := resp.read(1 << 20):
+                f.write(chunk)
+                if bar is not None:
+                    bar.update(len(chunk))
+                if progress_callback is not None and not progress_callback(existing + (bar.n if bar else f.tell()), total):
+                    raise InterruptedError("下载已取消")
+    finally:
+        if bar is not None:
+            bar.close()
 
 
 PARALLEL_SEGMENTS = 8        # 分段下载并发连接数
@@ -242,12 +286,19 @@ def _download(urls: List[str], dest: Path,
 
 def ensure_model(name: str, force: bool = False,
                  progress_callback: Optional[Callable[[int, int], bool]] = None) -> Path:
-    """确保模型权重已下载且 SHA256 匹配；返回权重路径。"""
+    """确保模型权重已下载且 SHA256 匹配；返回权重路径。
+
+    校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过 640MB 全量哈希。
+    """
     info = get_model_info(name)
     ckpt = models_dir() / f"{name}.ckpt"
 
     if ckpt.exists() and not force:
+        if _check_verified(ckpt):
+            print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
+            return ckpt
         if sha256_of(ckpt) == info["sha256"]:
+            _mark_verified(ckpt)
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
             return ckpt
         print(f"校验失败，重新下载: {ckpt.name}")
@@ -263,6 +314,7 @@ def ensure_model(name: str, force: bool = False,
             f"SHA256 校验失败: 期望 {info['sha256']}，实际 {actual}。"
             f"下载源可能已变更，请检查 {info['ckpt_url']}"
         )
+    _mark_verified(ckpt)
     print(f"完成: {ckpt}（{ckpt.stat().st_size / 1e6:.0f} MB）")
     return ckpt
 

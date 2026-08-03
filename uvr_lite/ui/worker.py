@@ -1,12 +1,17 @@
 # coding: utf-8
-"""分离任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。"""
+"""分离任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。
+
+会话复用：run() 开始时创建一个 Separator（模型只加载一次），全部文件共用，
+避免每文件重载 640MB 模型（批量场景的主要提速点）。
+"""
 
 from pathlib import Path
 from typing import Dict, List
 
 from PySide6.QtCore import QObject, Signal
 
-from ..engine import CancelledError, separate_file
+from ..engine import CancelledError, Separator
+from ..models import DEFAULT_MODEL
 from .progress import ProgressTracker
 
 
@@ -32,6 +37,19 @@ class SeparationWorker(QObject):
     def run(self) -> None:
         ok = failed = 0
         total = len(self.files)
+        try:
+            sep = Separator(
+                model_name=self.params.get("model_name", DEFAULT_MODEL),
+                device=self.params.get("device", "auto"),
+                batch_size=self.params.get("batch_size"),
+                num_overlap=self.params.get("num_overlap"),
+                verbose=False,
+            )
+        except Exception as e:  # noqa: BLE001 —— 模型下载/加载失败 → 整个队列失败
+            for idx in range(total):
+                self.file_failed.emit(idx, friendly_error(e))
+            self.all_finished.emit(0, total, False)
+            return
         for idx, f in enumerate(self.files):
             self._cur_idx = idx
             # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从 50% 起算、
@@ -40,9 +58,13 @@ class SeparationWorker(QObject):
             if self._cancel:
                 break
             try:
-                written = separate_file(
+                written = sep.separate(
                     str(f), str(self.out_dir),
-                    progress_callback=self._on_progress, **self.params,
+                    pcm=self.params.get("pcm", "PCM_24"),
+                    fmt=self.params.get("fmt", "auto"),
+                    bigshifts=self.params.get("bigshifts", 1),
+                    tta=self.params.get("tta", False),
+                    progress_callback=self._on_progress,
                 )
                 ok += 1
                 self.file_done.emit(idx, written)
