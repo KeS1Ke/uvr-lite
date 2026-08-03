@@ -269,6 +269,40 @@ def test_parallel_fallback_to_single_when_no_range(http_server, tmp_path):
 
 # ---------- UVR_MODEL_DIR 环境变量（安装场景：模型目录指向安装目录） ----------
 
+def test_repo_root_dev_layout():
+    """dev 布局：{repo}/uvr_lite/download.py → 根 = {repo}（含 pyproject/msst）。
+
+    回归：曾用固定 parents[2]，dev 下多跳一层解析到仓库上层，导致
+    models_dir 错位触发误下载（安装布局正确、dev 错误的双布局问题）。
+    """
+    from uvr_lite import download
+
+    root = download.repo_root()
+    assert (root / "pyproject.toml").exists()
+    assert (root / "uvr_lite").is_dir()
+    assert (root / "msst").is_dir()
+
+
+def test_repo_root_install_layout(monkeypatch, tmp_path):
+    """安装布局：{inst}/app/uvr_lite/__init__.py → 根 = {inst}。
+
+    app/ 快照层结构与 dev 仓库根几乎相同（都含 uvr_lite/msst/pyproject），
+    以父层含 models/ + torch_cpu/ 区分（install.iss 两个变体均安装这两目录）。
+    """
+    import uvr_lite
+    from uvr_lite import download
+
+    inst = tmp_path / "inst"
+    (inst / "app" / "uvr_lite").mkdir(parents=True)
+    (inst / "app" / "msst").mkdir(parents=True)
+    (inst / "models").mkdir(parents=True)
+    (inst / "torch_cpu").mkdir(parents=True)
+    (inst / "app" / "pyproject.toml").write_text("")
+    monkeypatch.setattr(uvr_lite, "__file__", str(inst / "app" / "uvr_lite" / "__init__.py"))
+
+    assert download.repo_root() == inst
+
+
 def test_models_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("UVR_MODEL_DIR", str(tmp_path / "custom"))
     from uvr_lite import download

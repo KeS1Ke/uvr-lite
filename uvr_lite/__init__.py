@@ -15,12 +15,23 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 
 def _base_dir() -> Path:
-    """安装场景 {app}（uvr_lite 位于 {app}/app/uvr_lite），开发场景仓库根。"""
-    return Path(__file__).resolve().parents[2]
+    """定位根目录（models/、torch_cpu/、torch.ini 所在层）。
+
+    - 开发场景：{repo}/uvr_lite/（uvr_lite 与 msst 平级于 {repo}）
+    - 安装场景：{inst}/app/uvr_lite/（根为 {inst}；快照的 app/ 层结构
+      与 dev 仓库根几乎相同，故以"父层含 models/ + torch_cpu/"区分）
+    """
+    f = Path(__file__).resolve()
+    for parent in f.parents:
+        if (parent / "uvr_lite").is_dir() and (parent / "msst").is_dir():
+            if (parent.parent / "models").is_dir() and (parent.parent / "torch_cpu").is_dir():
+                return parent.parent  # 安装 {inst}
+            return parent  # dev {repo}
+    raise RuntimeError(f"无法定位 uvr-lite 根目录（{f}）")
 
 
 def _torch_dir() -> Path | None:
