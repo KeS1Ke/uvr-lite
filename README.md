@@ -36,17 +36,22 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 
 ## Desktop GUI (Windows, recommended for non-technical users)
 
-**Download**: [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) (~49 MB)
+**Download** (pick the variant for your hardware):
+- [uvr-lite-setup-cpu.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-cpu.exe) — **~325 MB**, CPU-only torch (no NVIDIA GPU needed; most users)
+- [uvr-lite-setup-full.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-full.exe) — **~3.5 GB**, CPU + CUDA dual torch (for NVIDIA GPU users)
 
-1. **Double-click** the installer; pick an install location — a `uvr-lite` subfolder is created automatically (no file scattering)
-2. The wizard handles everything: Python (reuses a system Python ≥ 3.10, otherwise downloads a bundled one), PyTorch (CUDA build for NVIDIA GPUs via domestic mirrors, CPU otherwise), the model (~640 MB, SHA256 verified, resumable)
+Both are **self-contained** — Python, PyTorch, the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB with inaudible output difference) are all inside; no downloads during installation
+
+1. **Double-click** the installer; pick an install location (default: your user folder) — everything lands in one folder, no scattering
+2. The installer copies all components locally (**~2 GB on disk** for the cpu variant, **~5.5 GB** for full); **no internet needed** — what you download is what you get
 3. **Done** — a ♪ shortcut appears on your **desktop and Start menu**; double-click it to open the GUI
 4. Drag songs in (or pick a folder), choose the model, click **开始分离** (Start Separation) — live progress + ETA; completed files get a ✓, unreadable formats get a ✗ before processing starts
 
 Tips:
 
-- **Upgrade**: run the installer again — it updates the app and keeps your downloaded models
-- **Uninstall**: `uvr-lite-setup.exe --uninstall` (deletes the install folder and both shortcuts)
+- **Inference engine**: choose **自动 / CPU / CUDA** in the GUI (auto picks the CUDA build when a GPU is present, CPU otherwise); the switch takes effect after restarting uvr-lite
+- **Upgrade**: run the installer again — it overwrites in place and keeps your settings
+- **Uninstall**: Control Panel → Programs and Features → uvr-lite (also available as `Uninstall.exe` in the install folder); removes shortcuts, registry settings and the install folder
 - The GUI is in Chinese by design (target users: family & friends); the CLI below remains for power users
 
 ## Quick Start
@@ -65,14 +70,14 @@ install.bat
 bash install.sh
 ```
 
-The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUDA build of torch, or CPU build otherwise) → installs dependencies → downloads the model (~640 MB, SHA256 verified) → runs a smoke test on GPU setups.
+The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUDA build of torch, or CPU build otherwise) → installs dependencies → downloads the model (~320 MB, fp16-slimmed, SHA256 verified) → runs a smoke test on GPU setups.
 
 ### Manual install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat (PowerShell: .venv\Scripts\Activate.ps1)
 pip install -e .
-uvr-lite download                                    # download the model (~640 MB)
+uvr-lite download                                    # download the model (~320 MB)
 ```
 
 ## Usage
@@ -118,6 +123,9 @@ uvr-lite separate song.flac -m mel_band_karaoke
 # Low-VRAM GPUs: smaller batch size prevents OOM
 uvr-lite separate song.flac --batch-size 1
 
+# Speed/quality knob: 1 = no overlap (~2× faster), 2 = default, higher = smoother
+uvr-lite separate song.flac --num-overlap 1
+
 # List models / force re-download
 uvr-lite models
 uvr-lite download --force
@@ -131,25 +139,28 @@ uvr-lite download --force
 | `--device` | `auto` (default) / `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | Number of circular time-shift passes; >1 improves quality at linear cost (default 1) |
 | `--batch-size N` | Inference batch size (default from model config); set `1` on low-VRAM GPUs |
+| `--num-overlap N` | Overlapping chunk count (speed/quality knob): `1` = no overlap (~2× faster), `2` = default, higher = smoother edges |
 | `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
 
 **Notes**
 
 - **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
 - **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
-- **Disk space**: ~4 GB total (CUDA torch 2.5 GB + model 640 MB + dependencies)
+- **Disk space**: ~2 GB for the cpu package install, ~5.5 GB for full (dual CPU/CUDA PyTorch + fp16 model + Python)
+- **Model SHA256** is verified once and cached (`*.verified` marker) — subsequent runs skip the full-file hash
 
 ## How It Works
 
 ```
-input audio → librosa decode (44.1 kHz) → (optional normalization)
+input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optional normalization)
             → BigShifts circular time-shift averaging → BS-RoFormer forward (vocals mask)
             → instrumental = mix − vocals (mathematically lossless)
             → soundfile writes FLAC/WAV
 ```
 
 - **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
-- **Model**: `.ckpt` weights are hosted on [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) (the official UVR model repository), SHA256-verified, kept out of git
+- **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed** checkpoint (320 MB; `scripts/strip_model.py` converts the original, load-time is transparently cast back to fp32 with an ~-80 dB output difference); the original [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) weights remain as fallback mirrors. SHA256-verified, kept out of git
+- **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 640 MB checkpoint per file
 - **Layout**
 
 ```

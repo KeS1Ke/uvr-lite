@@ -1,6 +1,6 @@
 # ADR-001：uvr-lite UI 外包装
 
-- 状态：**已接受**（2026-08-03，grill 24 问对齐）
+- 状态：**已接受**（2026-08-03，grill 24 问对齐）；2026-08-03 修订：第 8/14 条打包形态改为 Inno Setup 全量安装包（PyInstaller 向导弃用，见修订注记）
 - 背景：CLI 面向非专业用户（自用 + 亲友），需要图形界面与一键安装；安装位置可选、无需预装 Python、桌面 ♪ 图标点击进入。
 
 ## 决策
@@ -14,13 +14,13 @@
 | 5 | 进度/取消 | `progress_callback(phase, done, total) -> bool`，返回 False 抛 `CancelledError`，UI 清理半成品；CLI 不传回调行为不变 |
 | 6 | 分发 | 快捷方式指 venv，UI 本体不打包 exe |
 | 7 | 图标 | ♪ 音乐符号（PIL 生成 ico+png，快捷方式/窗口/任务栏共用） |
-| 8 | 安装器形态 | GUI 安装向导，PySide6 同栈，onefile 单文件（~40MB，无 torch），携带代码快照 |
+| 8 | 安装器形态 | Inno Setup 7 全量安装包（内置绿色 Python + 全部依赖 + CPU/CUDA 双 torch + fp16 模型），安装 = 纯文件复制，用户免联网下载 |
 | 9 | Python 前置 | 自动检测系统 Python 3.10+ 复用；没有则下载 python-build-standalone（绿色解压到安装目录） |
 | 10 | 目录结构 | 单安装目录（默认 用户目录\uvr-lite）：代码+绿色 Python+venv+models |
 | 11 | 向导技术栈 | PySide6 同栈 |
 | 12 | 升级 | 覆盖升级：更新代码/依赖，保留 venv 与模型 |
 | 13 | 卸载 | 带卸载入口（--uninstall）：删目录+删快捷方式+确认弹窗 |
-| 14 | 打包形态 | PyInstaller onefile |
+| 14 | 打包形态 | Inno Setup 7 全量安装包（`uvr-lite-setup-{cpu|full}_v{version}.exe`，lzma2/ultra64；cpu 省 CUDA torch 3.3GB） |
 | 15 | 发布 | GitHub Releases 挂 setup exe，README 双语下载徽章 |
 | 16 | 模型缺失 | UI 内一键下载：提示条 + 下载按钮（复用 ensure_model，带进度与重试） |
 | 17 | 平台范围 | 仅 Windows 做 GUI 向导；Linux/macOS 维持 install.sh |
@@ -47,7 +47,7 @@
 - **进程内调 engine 而非子进程**：进度可控（回调）、取消可控、无 stdout 解析脆弱性；engine 改动约 15 行且 CLI 行为不变。
 - **回调返回 False 即取消**：长任务（CPU ~6× 实时）中途可停，是长任务 UI 基本体验；为后续批量队列复用。
 - **GUI 安装向导 + 绿色 Python**：非专业用户零前置（不装 Python、不 clone、不碰黑窗），单安装目录概念最简，卸载 = 删目录。
-- **onefile 而非 onedir**：非专业用户只下载一个文件。
+- **全量安装包而非运行时下载**：非专业用户零前置、零网络依赖；torch CPU/CUDA 双内置，应用内切换（torch.ini，重启生效）。原 PyInstaller onefile 向导方案因收集 bug 与 >2GB 体积不可行弃用；NSIS 有 ~2GB 硬上限（full 变体无法打包）→ 最终用 Inno Setup 7。
 - **覆盖升级**：保留 venv 与 640MB 模型，升级免重下。
 - **主源+镜像回退**：与 download.py 现有多源设计一致，国内网络安装成功率优先。
 

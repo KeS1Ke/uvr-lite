@@ -36,17 +36,22 @@ uvr-lite separate 歌曲.flac -o output
 
 ## 桌面界面（Windows，推荐非专业用户）
 
-**下载**：[uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe)（约 49 MB）
+**下载**（按你的硬件选一个变体）：
+- [uvr-lite-setup-cpu.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-cpu.exe) —— **约 325 MB**，仅 CPU 版 torch（无需独立显卡；大多数用户）
+- [uvr-lite-setup-full.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-full.exe) —— **约 3.5 GB**，CPU + CUDA 双版 torch（NVIDIA 显卡用户）
 
-1. **双击安装**，选择安装位置——程序会自动在所选文件夹下创建 `uvr-lite` 子文件夹（不会散落文件）
-2. 向导全自动：Python（有系统 Python ≥3.10 直接复用，没有则下载内置版）→ PyTorch（检测到 NVIDIA 显卡装 CUDA 版，走国内镜像加速；否则 CPU 版）→ 模型下载（约 640 MB，SHA256 校验，可断点续传）
+两者都是**全量安装包**——Python、PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半，输出差异不可闻）全部内置，安装过程无需联网下载任何组件
+
+1. **双击安装**，选择安装位置（默认：你的用户目录）——所有文件装进一个文件夹，不会散落
+2. 安装程序把全部组件复制到本机（**磁盘占用约 2 GB**（cpu 变体）/ **约 5.5 GB**（full））；**全程无需联网**——下载到什么就用什么
 3. **完成**——桌面与开始菜单出现 **♪ 快捷方式**，双击即可打开界面
 4. 把歌曲拖进窗口（或选择文件夹），选好模型，点「**开始分离**」——实时进度 + 预计剩余时间；处理完的文件打 **✓**，无法识别的格式在开始前就被标 **✗** 并跳过
 
 小贴士：
 
-- **升级**：重新运行安装程序即可——自动更新程序，保留已下载的模型
-- **卸载**：运行 `uvr-lite-setup.exe --uninstall`（删除安装目录与两处快捷方式）
+- **推理引擎**：界面里可选 **自动 / CPU / CUDA**（自动模式：有独立显卡用 CUDA 版，否则 CPU 版）；切换后重启 uvr-lite 生效
+- **升级**：重新运行安装程序即可——原地覆盖更新，保留你的设置
+- **卸载**：控制面板 → 程序和功能 → uvr-lite（或运行安装目录下的 `Uninstall.exe`）——删除快捷方式、注册表与安装目录
 - 界面为中文（面向亲友设计的）；命令行用法见下文，供高级用户使用
 
 ## 快速开始
@@ -65,14 +70,14 @@ install.bat
 bash install.sh
 ```
 
-脚本自动完成：创建虚拟环境 `.venv` → 检测 NVIDIA 显卡（有卡装 CUDA 版 torch / 无卡装 CPU 版）→ 安装依赖 → 下载模型权重（约 640 MB，SHA256 校验）→ （GPU 环境）冒烟测试。
+脚本自动完成：创建虚拟环境 `.venv` → 检测 NVIDIA 显卡（有卡装 CUDA 版 torch / 无卡装 CPU 版）→ 安装依赖 → 下载模型权重（约 320 MB，fp16 瘦身版，SHA256 校验）→ （GPU 环境）冒烟测试。
 
 ### 手动安装
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat（PowerShell: .venv\Scripts\Activate.ps1）
 pip install -e .
-uvr-lite download                                    # 下载模型（约 640 MB）
+uvr-lite download                                    # 下载模型（约 320 MB）
 ```
 
 ## 用法
@@ -118,6 +123,9 @@ uvr-lite separate song.flac -m mel_band_karaoke
 # 低显存 GPU：调小批大小防 OOM
 uvr-lite separate song.flac --batch-size 1
 
+# 质量/速度开关：1 = 无重叠（约 2 倍提速），2 = 默认，更大更稳
+uvr-lite separate song.flac --num-overlap 1
+
 # 查看模型状态 / 强制重下
 uvr-lite models
 uvr-lite download --force
@@ -131,25 +139,28 @@ uvr-lite download --force
 | `--device` | `auto`（默认）/ `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
 | `--batch-size N` | 推理批大小（默认取模型配置）；低显存 GPU 可设 `1` 防 OOM |
+| `--num-overlap N` | 重叠窗口数（质量/速度开关）：`1` 最快约 2 倍，`2` 默认，更大更稳 |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
 
 **注意事项**
 
 - **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
-- **磁盘占用**约 4 GB（CUDA torch 2.5GB + 模型 640MB + 依赖）
+- **磁盘占用**：cpu 变体约 2 GB，full 变体约 5.5 GB（双 torch + fp16 模型 320MB + Python）
+- **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
 
 ## 工作原理
 
 ```
-输入音频 → librosa 解码 (44.1kHz) → （可选归一化）
+输入音频 → soundfile+soxr 解码 (44.1kHz，m4a 兜底 audioread) → （可选归一化）
        → BigShifts 圆形时移平均 → BS-RoFormer 前向（vocals 掩码）
        → instrumental = 原混合 − vocals（数学无损）
        → soundfile 写 FLAC/WAV
 ```
 
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
-- **模型**：`.ckpt` 权重托管于 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo)（UVR 官方模型仓库），SHA256 完整性校验，不入 git
+- **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身版**（320 MB；`scripts/strip_model.py` 由原版转换，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）；原版 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) 权重保留为回退镜像。SHA256 完整性校验，不入 git
+- **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 640MB 权重
 - **代码结构**
 
 ```

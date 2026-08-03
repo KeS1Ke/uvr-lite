@@ -15,24 +15,24 @@
 | **任务队列（queue）** | UI 中待处理音频的列表。**两种添加方式**：选择文件（多选/拖拽）或选择输入文件夹（扫描其中常见音频格式 mp3/flac/wav/ogg/m4a，默认不递归、去重追加）。按添加顺序逐个处理；单文件失败跳过继续，结束汇总"成功 N / 失败 M"。 |
 | **ETA** | 预计剩余时间，按已完成文件的平均速度线性估算。 |
 | **UI 外包装** | 面向非专业用户的 PySide6 桌面界面，进程内调用引擎，不改变 CLI 行为。 |
-| **安装向导（installer）** | 独立的 Windows GUI 安装程序（PyInstaller onefile 打包，无 torch），引导非专业用户完成安装。 |
-| **绿色 Python** | python-build-standalone 发行版（自带 pip、绿色解压、不污染系统注册表），安装器在系统无 Python 时自动下载到安装目录。 |
-| **单安装目录** | 安装模型：代码 + 绿色 Python + `.venv` + `models/` 全部位于用户选择的一个目录内；卸载 = 删目录 + 删快捷方式。 |
-| **覆盖升级** | 检测到已安装时更新代码/依赖，保留 `.venv` 与 `models/`（免重下 640MB 模型）。 |
-| **镜像回退** | 下载失败时自动切换备用源（绿色 Python → ghproxy/国内镜像；torch → 清华 PyPI；模型 → HuggingFace 镜像），与 `download.py` 现有多源设计一致。 |
-| **快捷方式** | 安装后生成桌面 + 开始菜单两处入口（♪ 图标），指向 `.venv\Scripts\pythonw.exe -m uvr_lite.ui`（无黑窗）。 |
+| **全量安装包** | Inno Setup 7 制作的标准安装程序（`installer/install.iss`）：代码快照 + 内置绿色 Python（含全部依赖）+ CPU/CUDA 双 torch + 模型权重全部内置，用户安装即用、无需联网。 |
+| **推理引擎切换** | 安装包内 torch_cpu/ 与 torch_cuda/ 两套独立 torch，应用内选择（自动/CPU/CUDA）写 `torch.ini`，启动时 `uvr_lite/__init__.py` 把对应目录插入 sys.path（重启生效）。 |
+| **绿色 Python** | python-build-standalone 发行版，打包机下载后与依赖一起打进安装包；运行时直接使用（无 venv）。 |
+| **单安装目录** | 全部组件（代码 + Python + 双 torch + 模型）位于用户选择的一个目录内；卸载 = 控制面板卸载（删目录 + 快捷方式 + 注册表）。 |
+| **快捷方式** | 安装后生成桌面 + 开始菜单两处入口（♪ 图标），指向 `python\pythonw.exe -m uvr_lite.ui`（WorkingDir=app）。 |
 | **参数记忆** | QSettings 记住上次的模型/参数/输出目录，下次启动直接可用。 |
 
 ## 文件角色
 
 | 路径 | 角色 |
 |---|---|
-| `uvr_lite/engine.py` | 分离引擎（将被加进度回调，票 1） |
-| `uvr_lite/ui/` | UI 包（主窗口、推理线程、模型下载按钮） |
-| `installer/` | 安装向导源码（独立于 `uvr_lite` 包，PyInstaller 打包） |
-| `scripts/make_icon.py` | ♪ 图标生成器（PIL，输出 ico+png） |
-| `scripts/build_installer.py` | 安装器打包脚本（onefile，携带代码快照） |
+| `uvr_lite/engine.py` | 分离引擎（进度回调 + 取消） |
+| `uvr_lite/__init__.py` | 版本 + torch 二进制切换（torch.ini / UVR_TORCH） |
+| `uvr_lite/ui/` | UI 包（主窗口、推理线程、设备切换） |
+| `installer/install.iss` | Inno Setup 全量安装脚本（文件复制 + 快捷方式 + 卸载清理） |
+| `installer/copy_app.py` | 打包用代码快照复制（排除规则） |
+| `scripts/build_installer.py` | 打包脚本：组装 bundle（Python+依赖+双 torch+模型）→ ISCC 编译 |
 
 ## 决策索引
 
-- ADR-001：UI 外包装（UI/引擎接口/安装器/分发全套决策，24 条 + 5 项默认）
+- ADR-001：UI 外包装（UI/引擎接口/分发全套决策，24 条 + 5 项默认）；2026-08-03 更新：分发改为 **Inno Setup 全量安装包**（内置绿色 Python + 双 torch + fp16 模型，用户免联网下载；此前 PyInstaller 向导因收集 bug 弃用、NSIS 因 ~2GB 上限弃用）
