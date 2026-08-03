@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.1.0-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.2-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -36,20 +36,20 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 
 ## Desktop GUI (Windows, recommended for non-technical users)
 
-**Download** (pick the variant for your hardware):
-- [uvr-lite-setup-cpu.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-cpu.exe) — **~325 MB**, CPU-only torch (no NVIDIA GPU needed; most users)
-- [uvr-lite-setup-full.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-full.exe) — **~3.5 GB**, CPU + CUDA dual torch (for NVIDIA GPU users)
+**Download** — one installer for everyone:
+- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) — **~283 MB**, CPU torch built in (runs on any PC)
 
-Both are **self-contained** — Python, PyTorch, the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB with inaudible output difference) are all inside; no downloads during installation
+The base package is **self-contained** — Python, CPU PyTorch and the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB with inaudible output difference) are all inside; no downloads during installation. The **CUDA engine** (NVIDIA GPU acceleration) is optional and downloaded on demand (semi-online, same approach as UVR official):
 
 1. **Double-click** the installer; pick an install location (default: your user folder) — everything lands in one folder, no scattering
-2. The installer copies all components locally (**~2 GB on disk** for the cpu variant, **~5.5 GB** for full); **no internet needed** — what you download is what you get
+2. **Optional**: tick "下载 CUDA 推理引擎" (downloads ~3.3 GB, ~4.9 GB on disk) if you have an NVIDIA GPU — fetched during install with a progress page + SHA256 verification; skip it and add it later any time
 3. **Done** — a ♪ shortcut appears on your **desktop and Start menu**; double-click it to open the GUI
 4. Drag songs in (or pick a folder), choose the model, click **开始分离** (Start Separation) — live progress + ETA; completed files get a ✓, unreadable formats get a ✗ before processing starts
 
 Tips:
 
-- **Inference engine**: choose **自动 / CPU / CUDA** in the GUI (auto picks the CUDA build when a GPU is present, CPU otherwise); the switch takes effect after restarting uvr-lite
+- **Inference engine**: choose **自动 / CPU / CUDA** in the GUI (auto picks the CUDA engine when a GPU is present, CPU otherwise); the switch takes effect after restarting uvr-lite
+- **No GPU installed yet?** The GUI's **推理引擎** panel has a **下载 CUDA 引擎** button (resumable, multi-mirror fallback) — or run `uvr-lite install-cuda` from the CLI; install it whenever you like, no reinstall needed
 - **Upgrade**: run the installer again — it overwrites in place and keeps your settings
 - **Uninstall**: Control Panel → Programs and Features → uvr-lite (also available as `Uninstall.exe` in the install folder); removes shortcuts, registry settings and the install folder
 - The GUI is in Chinese by design (target users: family & friends); the CLI below remains for power users
@@ -129,6 +129,9 @@ uvr-lite separate song.flac --num-overlap 1
 # List models / force re-download
 uvr-lite models
 uvr-lite download --force
+
+# Install the CUDA engine for GPU acceleration (~3.3 GB, resumable)
+uvr-lite install-cuda
 ```
 
 | Option | Description |
@@ -146,7 +149,7 @@ uvr-lite download --force
 
 - **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
 - **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
-- **Disk space**: ~2 GB for the cpu package install, ~5.5 GB for full (dual CPU/CUDA PyTorch + fp16 model + Python)
+- **Disk space**: ~1.2 GB after installing the CPU package; +~4.9 GB if you add the CUDA engine
 - **Model SHA256** is verified once and cached (`*.verified` marker) — subsequent runs skip the full-file hash
 
 ## How It Works
@@ -168,7 +171,7 @@ uvr-lite/
 ├── uvr_lite/          # CLI package: separate / download / models commands
 │   ├── engine.py      #   separation engine (bigshifts averaging, lossless instrumental)
 │   ├── models.py      #   model registry (URL + SHA256)
-│   ├── download.py    #   streaming download + integrity check
+│   ├── download.py    #   streaming download + integrity check + CUDA engine installer
 │   └── configs/       #   model config yaml files
 ├── msst/              # vendored inference engine (ZFTurbo MSST subset, MIT)
 ├── install.bat|sh     # one-click installers

@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-![version](https://img.shields.io/badge/version-0.1.0-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.2-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -36,20 +36,20 @@ uvr-lite separate 歌曲.flac -o output
 
 ## 桌面界面（Windows，推荐非专业用户）
 
-**下载**（按你的硬件选一个变体）：
-- [uvr-lite-setup-cpu.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-cpu.exe) —— **约 325 MB**，仅 CPU 版 torch（无需独立显卡；大多数用户）
-- [uvr-lite-setup-full.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup-full.exe) —— **约 3.5 GB**，CPU + CUDA 双版 torch（NVIDIA 显卡用户）
+**下载**（只需一个安装包，人人适用）：
+- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) —— **约 283 MB**，内置 CPU 版 torch（任何电脑都能跑）
 
-两者都是**全量安装包**——Python、PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半，输出差异不可闻）全部内置，安装过程无需联网下载任何组件
+基础包**离线自包含**——Python、CPU 版 PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半，输出差异不可闻）全部内置，安装过程无需联网。**CUDA 引擎**（NVIDIA 显卡 GPU 加速）为可选组件，按需联网下载（半在线模式，与 UVR 官方同策略）：
 
 1. **双击安装**，选择安装位置（默认：你的用户目录）——所有文件装进一个文件夹，不会散落
-2. 安装程序把全部组件复制到本机（**磁盘占用约 2 GB**（cpu 变体）/ **约 5.5 GB**（full））；**全程无需联网**——下载到什么就用什么
+2. **可选**：有 NVIDIA 显卡的话勾选「**下载 CUDA 推理引擎**」（下载约 3.3 GB，磁盘占用约 4.9 GB）——安装中联网下载，带进度页 + SHA256 校验；不勾选也完全不影响使用，以后随时可补装
 3. **完成**——桌面与开始菜单出现 **♪ 快捷方式**，双击即可打开界面
 4. 把歌曲拖进窗口（或选择文件夹），选好模型，点「**开始分离**」——实时进度 + 预计剩余时间；处理完的文件打 **✓**，无法识别的格式在开始前就被标 **✗** 并跳过
 
 小贴士：
 
-- **推理引擎**：界面里可选 **自动 / CPU / CUDA**（自动模式：有独立显卡用 CUDA 版，否则 CPU 版）；切换后重启 uvr-lite 生效
+- **推理引擎**：界面里可选 **自动 / CPU / CUDA**（自动模式：有独立显卡用 CUDA 引擎，否则 CPU 版）；切换后重启 uvr-lite 生效
+- **暂时没有独立显卡？** 界面「**推理引擎**」区有「**下载 CUDA 引擎**」按钮（断点续传 + 多镜像回退），或在命令行运行 `uvr-lite install-cuda`——想什么时候装都行，无需重装
 - **升级**：重新运行安装程序即可——原地覆盖更新，保留你的设置
 - **卸载**：控制面板 → 程序和功能 → uvr-lite（或运行安装目录下的 `Uninstall.exe`）——删除快捷方式、注册表与安装目录
 - 界面为中文（面向亲友设计的）；命令行用法见下文，供高级用户使用
@@ -129,6 +129,9 @@ uvr-lite separate song.flac --num-overlap 1
 # 查看模型状态 / 强制重下
 uvr-lite models
 uvr-lite download --force
+
+# 安装 CUDA 引擎（GPU 加速，约 3.3 GB，断点续传）
+uvr-lite install-cuda
 ```
 
 | 参数 | 说明 |
@@ -146,7 +149,7 @@ uvr-lite download --force
 
 - **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
-- **磁盘占用**：cpu 变体约 2 GB，full 变体约 5.5 GB（双 torch + fp16 模型 320MB + Python）
+- **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.9 GB
 - **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
 
 ## 工作原理
@@ -168,7 +171,7 @@ uvr-lite/
 ├── uvr_lite/          # CLI 包：separate / download / models 命令
 │   ├── engine.py      #   分离引擎（bigshifts 平均、instrumental 数学无损）
 │   ├── models.py      #   模型注册表（URL + SHA256）
-│   ├── download.py    #   流式下载 + 完整性校验
+│   ├── download.py    #   流式下载 + 完整性校验 + CUDA 引擎安装
 │   └── configs/       #   模型配置 yaml
 ├── msst/              # vendored 推理引擎（ZFTurbo MSST 裁剪子集，MIT）
 ├── install.bat|sh     # 一键安装脚本
