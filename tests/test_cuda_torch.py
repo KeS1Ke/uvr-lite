@@ -123,3 +123,10 @@ def test_cuda_torch_installed_detects_marker(fake_wheel, tmp_path):
     assert cuda_torch_installed(tmp_path / "base")
     (tmp_path / "base" / "torch_cuda" / "torch" / "__init__.py").unlink()
     assert not cuda_torch_installed(tmp_path / "base")
+
+
+def test_cuda_urls_percent_encode_plus():
+    """URL 中 "+" 必须 %2B 编码——官方源（S3/CloudFront）对字面 + 返回 403。"""
+    for url in dl.TORCH_CUDA_URLS:
+        fname = url.rsplit("/", 1)[-1]
+        assert fname == "torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl", url

@@ -339,10 +339,12 @@ def download_all() -> None:
 # SHA256 于打包时下载一次算得（2bb8c05d…，3273024349 字节）。
 TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
 TORCH_CUDA_SHA256 = "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30"
+# URL 中 "+" 用 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403，此前
+# 官方回退源一直是坏的；SJTU/阿里云对两种形式均可（与 install.iss 一致）。
 TORCH_CUDA_URLS = [
-    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL}",
-    f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL}",
-    f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL}",
+    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
+    f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
+    f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
 ]
 
 

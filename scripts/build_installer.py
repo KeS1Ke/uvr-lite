@@ -68,6 +68,10 @@ GREEN_PY_URLS = [
 #   SJTU 15-17MB/s > 官方 13-14MB/s > 阿里云 3-4MB/s（需浏览器 UA，403 已修）。
 # 南大 mirror.nju.edu.cn 无 pytorch-wheels（404），未收录。
 TORCH_VERSION = "2.7.1"
+# CPU wheel 内容哈希：构建期校验（此前仅 CUDA 有 SHA，CPU 无校验直接 pip
+# 安装——镜像被投毒时无防线）。2026-08-27 SJTU 与官方下载字节级一致
+# （215985616 字节，双源分别校验）；阿里云同大小（Content-Length 一致）。
+TORCH_CPU_SHA256 = "0bc887068772233f532b51a3e8c8cfc682ae62bef74bf4e0c53526c8b9e4138f"
 TORCH_CPU_INDEXES = [
     "https://mirror.sjtu.edu.cn/pytorch-wheels/cpu",
     "https://download.pytorch.org/whl/cpu",
@@ -217,7 +221,18 @@ def _install_torch(bundle_dir: Path, tag: str, indexes: List[str]) -> Path:
           f"约 {3300 if tag == 'cuda' else 700}MB，多段并行 + 镜像回退）…")
     from uvr_lite import download as dl
 
-    dl._download([f"{idx}/{wheel_name}" for idx in indexes], wheel_path)
+    # URL 中 "+" 必须 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403
+    # （此前官方回退源一直是坏的）；SJTU/阿里云对两种形式均可（已验证）。
+    dl._download([f"{idx}/{wheel_name.replace('+', '%2B')}" for idx in indexes],
+                 wheel_path)
+    if tag == "cpu":
+        actual = sha256_of(wheel_path)
+        if actual != TORCH_CPU_SHA256:
+            wheel_path.unlink(missing_ok=True)
+            raise SystemExit(
+                f"CPU torch wheel 校验失败: 期望 {TORCH_CPU_SHA256[:16]}…，"
+                f"实际 {actual[:16]}…。下载源可能已变更，请核实镜像内容。")
+        print("    CPU wheel SHA256 校验通过")
     print(f"[4/5] 安装 torch_{tag} 到 {dest}…")
     # 依赖 nvidia-* 用默认清华源拉取（index="" 会走 pypi.org 官方源卡死）
     _pip(bundle_dir / "python" / "python.exe", [str(wheel_path)],
