@@ -60,6 +60,24 @@ def test_download_cancel_keeps_part(http_server, tmp_path):
     assert 0 < part.stat().st_size < len(DATA)
 
 
+def test_download_resume_progress_within_total(http_server, tmp_path):
+    """续传场景进度回调不得双计 .part 已有字节（回归：曾报 2×existing+done 超 total）。"""
+    dest = tmp_path / "m.ckpt"
+    part = dest.with_suffix(".ckpt.part")
+    part.write_bytes(DATA[: len(DATA) // 2])
+    calls = []
+
+    def cb(done, total):
+        calls.append((done, total))
+        return True
+
+    dl._download([f"{http_server}/model.bin"], dest, progress_callback=cb)
+    assert dest.read_bytes() == DATA
+    assert calls, "应至少回调一次"
+    assert max(d for d, _ in calls) <= len(DATA), "进度不得超过 total"
+    assert calls[-1] == (len(DATA), len(DATA))
+
+
 def test_download_resume_after_cancel(http_server, tmp_path):
     """取消后再次下载应从 .part 续传并完整落盘。"""
     dest = tmp_path / "m.ckpt"
@@ -131,6 +149,28 @@ def test_ensure_model_downloads_with_progress(fake_download_env):
     dl.ensure_model("test_model", progress_callback=cb)
     assert (fake_download_env / "test_model.ckpt").read_bytes() == DATA
     assert calls[-1] == (len(DATA), len(DATA))
+
+
+# ---------- 模块导入（tqdm 静默降级） ----------
+
+def test_download_imports_without_tqdm(monkeypatch):
+    """无 tqdm 环境（安装链绿色 Python 场景）应可导入 download 并降级为 None。
+
+    回归：曾顶部无条件 `from tqdm.auto import tqdm`，下面的 try/except 降级
+    是死代码——缺 tqdm 时模块导入直接 ImportError。
+    """
+    import importlib
+    import sys
+
+    import uvr_lite.download as dl
+
+    monkeypatch.setitem(sys.modules, "tqdm", None)
+    monkeypatch.setitem(sys.modules, "tqdm.auto", None)
+    dl = importlib.reload(dl)
+    assert dl.tqdm is None, "缺 tqdm 时应静默降级为 None，而不是 ImportError"
+    monkeypatch.undo()  # 恢复 sys.modules 后重载回真实状态，避免污染其他测试
+    dl = importlib.reload(dl)
+    assert dl.tqdm is not None
 
 
 # ---------- 校验缓存（.verified 标记） ----------

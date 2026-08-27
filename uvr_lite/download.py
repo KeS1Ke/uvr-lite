@@ -18,8 +18,6 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from tqdm.auto import tqdm
-
 from . import _base_dir  # noqa: E402 —— 根目录定位（dev/安装两布局）
 from .models import MODEL_REGISTRY, get_model_info
 
@@ -123,9 +121,11 @@ def _download_single(url: str, tmp: Path,
     total = existing + remaining if resume else remaining
 
     mode = "ab" if resume else "wb"
+    # 进度起点：续传从 existing 起；服务器忽略 Range 重下时文件被截断，从 0 起
+    start = existing if resume else 0
     bar = None
     if tqdm is not None:
-        bar = tqdm(initial=existing, total=total, unit="B", unit_scale=True,
+        bar = tqdm(initial=start, total=total, unit="B", unit_scale=True,
                    desc=f"下载 {tmp.name[:-5]}", miniters=1)
     try:
         with open(tmp, mode) as f:
@@ -133,7 +133,8 @@ def _download_single(url: str, tmp: Path,
                 f.write(chunk)
                 if bar is not None:
                     bar.update(len(chunk))
-                if progress_callback is not None and not progress_callback(existing + (bar.n if bar else f.tell()), total):
+                # f.tell() 即已落盘字节（续传含 existing），不存在双计
+                if progress_callback is not None and not progress_callback(f.tell(), total):
                     raise InterruptedError("下载已取消")
     finally:
         if bar is not None:
