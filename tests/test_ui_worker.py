@@ -1,10 +1,12 @@
 # coding: utf-8
 """SeparationWorker 进度跨文件测试：tracker 每文件重置，杜绝进度回跳。"""
 
+import subprocess
+import sys
+
 import pytest
 from PySide6.QtCore import QCoreApplication
 
-from uvr_lite.ui import worker
 from uvr_lite.ui.worker import SeparationWorker
 
 
@@ -12,6 +14,19 @@ from uvr_lite.ui.worker import SeparationWorker
 def qapp():
     app = QCoreApplication.instance() or QCoreApplication([])
     yield app
+
+
+def test_ui_import_does_not_load_torch():
+    """UI 启动路径（ui.main → worker）不得加载 torch。
+
+    torch 导入约 2-6s + 上 GB 内存；引擎应在首个分离任务时才加载。
+    子进程隔离：测试进程本身可能已因其他用例导入 torch。
+    """
+    code = ("import sys; import uvr_lite.ui.main; "
+            "sys.exit(0 if 'torch' not in sys.modules else 1)")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True)
+    assert r.returncode == 0, (
+        f"import uvr_lite.ui.main 不应加载 torch（实际已加载）: {r.stderr.decode()[-200:]}")
 
 
 def _run_two_files(monkeypatch, files, params):
@@ -30,7 +45,8 @@ def _run_two_files(monkeypatch, files, params):
                 assert progress_callback(phase, done, total) is True
             return [path]
 
-    monkeypatch.setattr(worker, "Separator", FakeSeparator)
+    # run() 内惰性 `from ..engine import Separator` → patch 定义处
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
     w = SeparationWorker(files, "out", params)
     progress = []
     w.progress.connect(lambda ph, d, t, idx, ftot, pct: progress.append((idx, ph, pct)))

@@ -3,6 +3,9 @@
 
 会话复用：run() 开始时创建一个 Separator（模型只加载一次），全部文件共用，
 避免每文件重载 640MB 模型（批量场景的主要提速点）。
+
+引擎惰性导入：worker 模块只依赖 Qt/轻量模块，torch（约 2-6s 导入 + 上 GB
+内存）推迟到首个分离任务才加载——UI 启动、列表编辑零引擎开销。
 """
 
 from pathlib import Path
@@ -10,7 +13,6 @@ from typing import Dict, List
 
 from PySide6.QtCore import QObject, Signal
 
-from ..engine import CancelledError, Separator
 from ..models import DEFAULT_MODEL
 from .progress import ProgressTracker
 
@@ -35,6 +37,9 @@ class SeparationWorker(QObject):
         self._cancel = True
 
     def run(self) -> None:
+        # 惰性导入：首个分离任务才加载 torch（单测 patch 定义处 uvr_lite.engine.Separator）
+        from ..engine import CancelledError, Separator
+
         ok = failed = 0
         total = len(self.files)
         try:
