@@ -338,13 +338,16 @@ def prepare_bundle(bundle_dir: Path) -> None:
     # 4. CPU torch（独立目录，应用内切换）
     _install_torch(bundle_dir, "cpu", TORCH_CPU_INDEXES)
 
-    # 5. 模型权重（SHA256 校验；已就绪则复用）
+    # 5. 模型权重（SHA256 校验；已就绪则复用）。本地文件名由注册表的
+    #    filename 字段决定（safetensors 或 ckpt），不写死扩展名
     os.environ["UVR_MODEL_DIR"] = str(bundle_dir / "models")
     from uvr_lite.download import ensure_model
-    from uvr_lite.models import DEFAULT_MODEL
+    from uvr_lite.models import DEFAULT_MODEL, get_model_info
 
+    model_file = bundle_dir / "models" / get_model_info(DEFAULT_MODEL).get(
+        "filename", f"{DEFAULT_MODEL}.ckpt")
     ensure_model(DEFAULT_MODEL)
-    print(f"[4/5] 模型: {bundle_dir / 'models' / f'{DEFAULT_MODEL}.ckpt'}")
+    print(f"[4/5] 模型: {model_file}")
 
 
 # ---------- 编译 ----------
