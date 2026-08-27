@@ -55,7 +55,7 @@ def pick_device(device: str) -> str:
 
 
 def load_model(model_name: str, ckpt_path: Path, device: str):
-    """加载模型与配置（结构同 MSST inference.py 的 proc_folder 前半段）。"""
+    """加载模型与配置（加载流程对齐 MSST 上游的 inference 惯例）。"""
     info = get_model_info(model_name)
     torch.backends.cudnn.benchmark = True
 
