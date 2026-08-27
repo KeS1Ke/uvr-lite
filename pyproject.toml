@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "torch>=2.1",
+    "safetensors>=0.4",
     "soundfile>=0.12",
     "soxr>=0.3",
     "audioread>=3.0",

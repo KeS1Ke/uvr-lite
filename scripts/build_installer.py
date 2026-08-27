@@ -86,7 +86,7 @@ PIP_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DEPENDENCIES = [
     "numpy>=1.24", "soundfile>=0.12", "soxr>=0.3", "audioread>=3.0",
     "pyyaml>=6.0", "ml-collections>=0.1.1", "einops>=0.7", "beartype>=0.16",
-    "packaging>=23", "tqdm>=4.60",
+    "packaging>=23", "tqdm>=4.60", "safetensors>=0.4",
     "PySide6-Essentials>=6.6",
 ]
 

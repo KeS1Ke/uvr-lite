@@ -60,16 +60,21 @@ def load_model(model_name: str, ckpt_path: Path, device: str):
     torch.backends.cudnn.benchmark = True
 
     model, config = get_model_from_config(info["model_type"], str(config_path(model_name)))
-    # weights_only=True：只允许纯张量/基础类型，杜绝 pickle 任意代码执行面。
-    # 注册表模型均为 fp16-lite 纯张量格式（{"state_dict": ...}），实测可加载；
+    # .safetensors 无 pickle 载入面，加载更快；.ckpt 用 weights_only=True
+    # 只允许纯张量/基础类型。注册表模型为 fp16 扁平格式（纯张量）；
     # 上游 exotic 格式失败时给出可行动的错误而非静默回退到不安全加载。
-    try:
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    except pickle.UnpicklingError as e:
-        raise RuntimeError(
-            f"权重文件含非张量对象，安全模式加载失败: {ckpt_path}\n"
-            "请删除该文件后重新下载；若持续失败请提 issue（可能上游格式变更）"
-        ) from e
+    if ckpt_path.suffix == ".safetensors":
+        from safetensors.torch import load_file
+
+        checkpoint = load_file(str(ckpt_path), device="cpu")
+    else:
+        try:
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        except pickle.UnpicklingError as e:
+            raise RuntimeError(
+                f"权重文件含非张量对象，安全模式加载失败: {ckpt_path}\n"
+                "请删除该文件后重新下载；若持续失败请提 issue（可能上游格式变更）"
+            ) from e
     args = argparse.Namespace(
         start_check_point=str(ckpt_path),
         model_type=info["model_type"],

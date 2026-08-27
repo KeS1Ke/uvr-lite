@@ -54,3 +54,15 @@ def test_engine_load_model_accepts_pure_tensors(tmp_path, monkeypatch):
 
     model, _ = engine.load_model("m", good, "cpu")
     assert model is not None
+
+
+def test_engine_load_model_safetensors(tmp_path, monkeypatch):
+    """.safetensors 权重走 safetensors.torch.load_file（无 pickle 载入面）。"""
+    _patch_engine(monkeypatch)
+    from safetensors.torch import save_file
+
+    good = tmp_path / "good.safetensors"
+    save_file({"w": torch.zeros(3)}, str(good))
+
+    model, _ = engine.load_model("m", good, "cpu")
+    assert model is not None

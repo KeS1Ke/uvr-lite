@@ -354,3 +354,16 @@ def test_models_dir_default_no_env(monkeypatch, tmp_path):
     from uvr_lite import download
     monkeypatch.setattr(download, "repo_root", lambda: tmp_path / "repo")
     assert download.models_dir() == tmp_path / "repo" / "models"
+
+
+def test_ensure_model_respects_registry_filename(http_server, tmp_path, monkeypatch):
+    """注册表 filename 字段决定本地文件名（支持 .safetensors 分发）。"""
+    from uvr_lite import models
+
+    entry = _fake_registry(http_server)["test_model"]
+    entry["filename"] = "test_model.lite.safetensors"
+    monkeypatch.setattr(models, "MODEL_REGISTRY", {"test_model": entry})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    p = dl.ensure_model("test_model")
+    assert p.name == "test_model.lite.safetensors"
+    assert p.read_bytes() == DATA

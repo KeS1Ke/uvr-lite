@@ -6,15 +6,18 @@
 原版差异约 -58dB（实测相对误差 0.84%，不可闻），内存/速度均不变。
 
 用法:
-  python scripts/strip_model.py <输入.ckpt> <输出.ckpt>
+  python scripts/strip_model.py <输入.ckpt> <输出.ckpt> [--format ckpt|safetensors]
   python scripts/strip_model.py models/bs_roformer_ep317.ckpt \
-      models/bs_roformer_ep317.lite.ckpt
+      models/bs_roformer_ep317.lite.safetensors --format safetensors
 
-输出 {"state_dict": ...} 封装，兼容 msst load_start_checkpoint
-（inference 模式对 "state"/"state_dict"/"model_state_dict" 键均兼容）。
+输出形态：
+  - ckpt：{"state_dict": ...} 封装，兼容 msst load_start_checkpoint
+    （inference 模式对 "state"/"state_dict"/"model_state_dict" 键均兼容）
+  - safetensors：纯 state_dict 扁平文件——无 pickle 载入面（引擎按扩展名
+    用 safetensors.torch.load_file 加载，天然防任意代码执行），加载更快
 
 发布：瘦身版上传到自己的 GitHub Releases，更新 uvr_lite/models.py 注册表
-（ckpt_url + sha256，另在 README 说明下载差异），原版 URL 保留为 mirror 回退。
+（ckpt_url + sha256 + filename；mirror 必须与主源内容一致——同 hash）。
 """
 
 import argparse
@@ -24,13 +27,8 @@ from pathlib import Path
 import torch
 
 
-def strip_ckpt(src: Path, dst: Path) -> None:
-    """加载 fp32 ckpt，转 fp16 后按 {"state_dict": ...} 保存。"""
-    ckpt = torch.load(src, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict):
-        raise SystemExit(f"不是标准 ckpt dict: {type(ckpt)}")
-
-    # 兼容包装键（htdemucs/apollo 等）与纯 state_dict 两种形态
+def _to_half_state_dict(ckpt: dict) -> tuple:
+    """提取 state_dict 并转 fp16；返回 (sd16, n_params)。"""
     sd = None
     for key in ("state", "state_dict", "model_state_dict"):
         if isinstance(ckpt.get(key), dict):
@@ -40,12 +38,30 @@ def strip_ckpt(src: Path, dst: Path) -> None:
     if sd is None:
         sd = ckpt
         print("ckpt 本身即 state_dict")
-
     n_params = sum(v.numel() for v in sd.values() if isinstance(v, torch.Tensor))
     sd16 = {k: v.half() if isinstance(v, torch.Tensor) else v for k, v in sd.items()}
+    return sd16, n_params
 
+
+def strip_ckpt(src: Path, dst: Path, fmt: str = "ckpt") -> None:
+    """加载 fp32 ckpt，转 fp16 后按指定格式保存。"""
+    ckpt = torch.load(src, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict):
+        raise SystemExit(f"不是标准 ckpt dict: {type(ckpt)}")
+
+    sd16, n_params = _to_half_state_dict(ckpt)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": sd16}, dst)
+
+    if fmt == "safetensors":
+        from safetensors.torch import save_file
+
+        non_tensor = [k for k, v in sd16.items() if not isinstance(v, torch.Tensor)]
+        if non_tensor:
+            print(f"警告: {len(non_tensor)} 个非张量键被跳过（safetensors 仅支持张量）"
+                  f": {', '.join(non_tensor[:5])}")
+        save_file({k: v for k, v in sd16.items() if isinstance(v, torch.Tensor)}, dst)
+    else:
+        torch.save({"state_dict": sd16}, dst)
 
     src_mb = src.stat().st_size / 1e6
     dst_mb = dst.stat().st_size / 1e6
@@ -58,11 +74,14 @@ def strip_ckpt(src: Path, dst: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="模型瘦身：fp32 → fp16 存储（体积减半）")
     ap.add_argument("src", type=Path, help="输入 fp32 ckpt")
-    ap.add_argument("dst", type=Path, help="输出 fp16 ckpt")
+    ap.add_argument("dst", type=Path, help="输出 fp16 权重（扩展名 .safetensors 时可自动选格式）")
+    ap.add_argument("--format", choices=["ckpt", "safetensors"], default=None,
+                    help="输出格式（默认按 dst 扩展名推断，.safetensors → safetensors）")
     args = ap.parse_args()
     if not args.src.exists():
         raise SystemExit(f"输入不存在: {args.src}")
-    strip_ckpt(args.src, args.dst)
+    fmt = args.format or ("safetensors" if args.dst.suffix == ".safetensors" else "ckpt")
+    strip_ckpt(args.src, args.dst, fmt)
     return 0
 
 

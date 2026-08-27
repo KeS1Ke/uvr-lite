@@ -294,10 +294,11 @@ def ensure_model(name: str, force: bool = False,
                  progress_callback: Callable[[int, int], bool] | None = None) -> Path:
     """确保模型权重已下载且 SHA256 匹配；返回权重路径。
 
-    校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过 640MB 全量哈希。
+    校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过全量哈希。
+    权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
     """
     info = get_model_info(name)
-    ckpt = models_dir() / f"{name}.ckpt"
+    ckpt = models_dir() / info.get("filename", f"{name}.ckpt")
 
     if ckpt.exists() and not force:
         if _check_verified(ckpt):
