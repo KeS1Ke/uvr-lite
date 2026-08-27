@@ -1,4 +1,3 @@
-# coding: utf-8
 """把 uvr-lite 打成半在线标准安装包（Inno Setup 7）。
 
 用法: python scripts/build_installer.py [--out dist] [--iscc <ISCC.exe 路径>]
@@ -27,8 +26,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -102,15 +101,15 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download_to(urls: List[str], dest: Path,
-                 progress_cb: Optional[Callable[[int, int], bool]] = None) -> None:
+def _download_to(urls: list[str], dest: Path,
+                 progress_cb: Callable[[int, int], bool] | None = None) -> None:
     """多源回退下载（单连接 + Range 续传），全部失败才报错。"""
     from uvr_lite import download as dl
 
     dl._download(urls, dest, progress_cb)
 
 
-def _run(cmd: List[str], desc: str) -> None:
+def _run(cmd: list[str], desc: str) -> None:
     print(f"  → {desc}")
     subprocess.run(cmd, check=True)
 
@@ -121,7 +120,7 @@ def _download_green_python(bundle_dir: Path) -> None:
     """下载并解压绿色 Python 到 bundle/python/（SHA256 校验）。"""
     dest = bundle_dir / "python"
     archive = bundle_dir / GREEN_PY_FILENAME
-    print(f"[1/5] 下载内置 Python（约 50MB，SHA256 校验）…")
+    print("[1/5] 下载内置 Python（约 50MB，SHA256 校验）…")
     _download_to(GREEN_PY_URLS, archive)
     actual = sha256_of(archive)
     if actual != GREEN_PY_SHA256:
@@ -150,8 +149,8 @@ def _download_green_python(bundle_dir: Path) -> None:
     archive.unlink(missing_ok=True)
 
 
-def _pip(python_exe: Path, specs: List[str], index: str = PIP_INDEX,
-         target: Optional[Path] = None, no_deps: bool = False) -> None:
+def _pip(python_exe: Path, specs: list[str], index: str = PIP_INDEX,
+         target: Path | None = None, no_deps: bool = False) -> None:
     """pip 安装（默认清华源；失败自动回退官方源）。"""
     for idx in [index, ""]:
         cmd = [str(python_exe), "-m", "pip", "install", "--disable-pip-version-check",
@@ -194,7 +193,7 @@ def _prune_torch(dest: Path) -> None:
     print(f"    {dest.name} 裁剪完成（.lib/include/bin 已删）")
 
 
-def _install_torch(bundle_dir: Path, tag: str, indexes: List[str]) -> Path:
+def _install_torch(bundle_dir: Path, tag: str, indexes: list[str]) -> Path:
     """把 torch 装到独立目录（--no-deps：依赖已在 python/ 内）。
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
@@ -378,7 +377,7 @@ def build(iscc: Path, out_dir: Path) -> Path:
         f"/DMyAppVersion={__version__}",
         str(ROOT / "installer" / "install.iss"),
     ]
-    print(f"[5/5] ISCC 编译中（压缩需较长时间）…")
+    print("[5/5] ISCC 编译中（压缩需较长时间）…")
     subprocess.run(cmd, check=True)
     exe = out_dir / f"{setup_name()}.exe"
     if not exe.exists():

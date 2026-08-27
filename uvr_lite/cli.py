@@ -1,14 +1,11 @@
-# coding: utf-8
 """命令行入口：uvr-lite separate / download / models / version。"""
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from . import __version__
 from .download import ensure_model, models_dir
-from .models import MODEL_REGISTRY, DEFAULT_MODEL
+from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
 
 def _cmd_separate(args: argparse.Namespace) -> int:
@@ -43,8 +40,9 @@ def _cmd_download(args: argparse.Namespace) -> int:
 
 def _cmd_install_cuda(args: argparse.Namespace) -> int:
     """下载并安装 CUDA 推理引擎（终端进度条，断点续传 + 镜像回退）。"""
-    from .download import install_cuda_torch
     from tqdm.auto import tqdm
+
+    from .download import install_cuda_torch
 
     bar = {}
 
@@ -107,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_dl = sub.add_parser("download", help="下载模型权重（带 SHA256 校验）")
     p_dl.add_argument("model", nargs="?", default=DEFAULT_MODEL,
-                      choices=list(MODEL_REGISTRY) + ["all"],
+                      choices=[*MODEL_REGISTRY, "all"],
                       help="模型名或 all（默认 bs_roformer_ep317）")
     p_dl.add_argument("--force", action="store_true", help="强制重新下载")
     p_dl.set_defaults(func=_cmd_download)

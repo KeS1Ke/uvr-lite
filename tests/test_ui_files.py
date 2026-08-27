@@ -1,4 +1,3 @@
-# coding: utf-8
 """票 2：输入文件扫描（选择文件夹添加方式）的纯函数测试。"""
 
 from pathlib import Path

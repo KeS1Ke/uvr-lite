@@ -1,4 +1,3 @@
-# coding: utf-8
 """模型瘦身：fp32 ckpt → fp16 存储（体积减半，推理精度不变）。
 
 背景：viperx/aufr33 发布的 ckpt 顶层就是纯 state_dict（699 个 fp32 tensor，

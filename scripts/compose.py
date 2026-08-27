@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 合成引擎: 基于 goghost-origin.flac 分析画像, 生成 ~3 分钟 J-rock 风格纯器乐新作
 - 150 BPM / 4/4 / 八分直拍驱动 (对齐原曲画像)
@@ -11,6 +10,7 @@
 import json
 import os
 import wave
+
 import numpy as np
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -233,10 +233,7 @@ def gen_melody(bar_start, n_bars, scale, density, phrase_len=4, rng_local=None,
 # ---------------- 段落谱 ----------------
 S = []
 def add(name, bars, prog, energy, mel=None):
-    if len(prog) >= bars:
-        prog = prog[:bars]
-    else:
-        prog = prog * (bars // len(prog))
+    prog = prog[:bars] if len(prog) >= bars else prog * (bars // len(prog))
     S.append({"name": name, "bars": bars, "prog": prog,
               "energy": energy, "mel": mel})
 
@@ -245,13 +242,13 @@ add("build1",  8, ["Dm", "Bb", "F", "A"] * 2, 1)
 add("verse1", 12, ["Dm", "Bb", "Gm", "A"] * 2 + ["F", "C", "Dm", "A7"], 2,
     dict(density=0.5, base=62, span=14))
 add("pre1",    8, ["F", "C", "Dm", "A7"] * 2, 2)
-add("chorus1",16, (["Dm", "Bb", "F", "C"] + ["Dm", "Bb", "Gm", "A7"]) * 2, 3,
+add("chorus1",16, ["Dm", "Bb", "F", "C", "Dm", "Bb", "Gm", "A7"] * 2, 3,
     dict(density=0.75, base=69, span=16))
 add("bridge",  8, ["Bb", "Gm", "Dm", "A"] * 2, 1)
 add("verse2", 12, ["Dm", "Bb", "Gm", "A"] * 2 + ["F", "C", "Dm", "A7"], 2,
     dict(density=0.55, base=62, span=14))
 add("build2",  4, ["F", "C", "Dm", "A7"], 2)
-add("final",  24, (["Dm", "Bb", "F", "C"] + ["Dm", "Bb", "Gm", "A7"]) * 3 +
+add("final",  24, ["Dm", "Bb", "F", "C", "Dm", "Bb", "Gm", "A7"] * 3 +
                   ["Dm", "Bb", "F", "C"] + ["F", "C", "Dm", "A7"] + ["Gm", "A7", "Dm", "Dm"], 3,
     dict(density=0.85, base=69, span=16))
 add("outro",  12, ["Dm", "Bb", "F", "A"] * 2 + ["Dm", "Dm", "Dm", "Dm"], 1,
@@ -359,7 +356,11 @@ def main():
     lead.add(last_start + 1 * BAR, lambda: lead_note(nf(69), 6 * BAR), 0.4, 0)
 
     print("渲染各轨 ...")
-    drums.render(); bass.render(); guitar.render(); pad.render(); lead.render()
+    drums.render()
+    bass.render()
+    guitar.render()
+    pad.render()
+    lead.render()
 
     # ---------------- 效果: 混响 / 延迟 ----------------
     print("混响 + 延迟 ...")

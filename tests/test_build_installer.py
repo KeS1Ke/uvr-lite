@@ -1,4 +1,3 @@
-# coding: utf-8
 """打包脚本的可单测部分：CPU torch wheel 的 SHA 校验与 URL 编码。
 
 此前仅 CUDA wheel 有 SHA（install.iss 与 download.py 双向一致检查），CPU

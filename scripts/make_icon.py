@@ -1,4 +1,3 @@
-# coding: utf-8
 """生成 uvr-lite ♪ 图标（ico + png）。
 
 用法: python scripts/make_icon.py

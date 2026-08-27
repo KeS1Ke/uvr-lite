@@ -1,4 +1,3 @@
-# coding: utf-8
 """uvr-lite：轻量级人声/伴奏分离工具。
 
 推理引擎裁剪自 ZFTurbo Music-Source-Separation-Training（MIT），

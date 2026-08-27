@@ -1,4 +1,3 @@
-# coding: utf-8
 """模型下载：从主源拉取权重到 models/ 目录，带 SHA256 完整性校验。
 
 - 断点续传：`.part` 文件已存在时用 HTTP Range 头续传，避免中断后全量重下
@@ -15,10 +14,10 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional
 
-from . import _base_dir  # noqa: E402 —— 根目录定位（dev/安装两布局）
+from . import _base_dir
 from .models import MODEL_REGISTRY, get_model_info
 
 # 浏览器 UA：阿里云 pytorch-wheels 等镜像对非浏览器 UA 返回 403（曾实测），
@@ -30,7 +29,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 下载逻辑本身走 progress_callback，无 tqdm 时静默降级。
 try:
     from tqdm.auto import tqdm
-except ImportError:  # noqa: BLE001
+except ImportError:
     tqdm = None
 
 
@@ -88,12 +87,12 @@ def _mark_verified(ckpt: Path) -> None:
     try:
         st = ckpt.stat()
         _verified_marker(ckpt).write_text(f"{st.st_size}:{st.st_mtime_ns}", encoding="utf-8")
-    except OSError:  # noqa: BLE001 —— 标记写失败只影响下次全量校验，不阻塞
+    except OSError:
         pass
 
 
 def _download_single(url: str, tmp: Path,
-                     progress_callback: Optional[Callable[[int, int], bool]] = None) -> None:
+                     progress_callback: Callable[[int, int], bool] | None = None) -> None:
     """单连接下载（Range 断点续传）；失败抛异常由上层切换源。
 
     progress_callback(done_bytes, total_bytes) -> bool：返回 False 视为用户
@@ -168,8 +167,8 @@ def _probe_range(url: str) -> tuple:
 
 def _download_segment(url: str, part: Path, start: int, end: int,
                       retries: int,
-                      cancel_check: Optional[Callable[[], bool]] = None,
-                      on_chunk: Optional[Callable[[int], None]] = None) -> None:
+                      cancel_check: Callable[[], bool] | None = None,
+                      on_chunk: Callable[[int], None] | None = None) -> None:
     """下载 [start, end] 段到 part 文件；已下载部分（段文件大小）自动续传。
 
     失败重试 retries 次（Range 续传，成本低）；全部失败抛 RuntimeError。
@@ -199,14 +198,14 @@ def _download_segment(url: str, part: Path, start: int, end: int,
             return
         except InterruptedError:
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if attempt >= retries:
                 raise RuntimeError(f"段 {start}-{end} 下载失败: {e}") from e
     raise RuntimeError(f"段 {start}-{end} 下载失败")
 
 
 def _download_parallel(url: str, tmp: Path, total: int,
-                       progress_callback: Optional[Callable[[int, int], bool]] = None,
+                       progress_callback: Callable[[int, int], bool] | None = None,
                        segments: int = PARALLEL_SEGMENTS,
                        retries: int = 2) -> None:
     """多连接分段下载到 tmp（段文件 tmp.s0..sN，完成后按序合并）。
@@ -214,8 +213,8 @@ def _download_parallel(url: str, tmp: Path, total: int,
     取消：progress_callback 返回 False → 各段线程抛 InterruptedError
     （段文件保留，下次续传）。
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     seg_size = (total + segments - 1) // segments
     parts = [tmp.with_name(f"{tmp.name}.s{i}") for i in range(segments)]
@@ -226,7 +225,8 @@ def _download_parallel(url: str, tmp: Path, total: int,
         """增量累计已下载字节；限频上报进度，返回 False 置取消标志。"""
         with lock:
             state["done"] += n
-            if progress_callback is not None and state["done"] - state["last_report"] >= _REPORT_INTERVAL:
+            if (progress_callback is not None
+                    and state["done"] - state["last_report"] >= _REPORT_INTERVAL):
                 state["last_report"] = state["done"]
                 if not progress_callback(state["done"], total):
                     state["cancel"] = True
@@ -261,8 +261,8 @@ def _download_parallel(url: str, tmp: Path, total: int,
                 part.unlink()
 
 
-def _download(urls: List[str], dest: Path,
-              progress_callback: Optional[Callable[[int, int], bool]] = None,
+def _download(urls: list[str], dest: Path,
+              progress_callback: Callable[[int, int], bool] | None = None,
               retries: int = 2) -> None:
     """按顺序尝试各下载源（每源最多重试 retries 次）；全部失败才报错。
 
@@ -284,14 +284,14 @@ def _download(urls: List[str], dest: Path,
                 return
             except InterruptedError:
                 raise
-            except Exception as e:  # noqa: BLE001 —— 换源/重试（断点续传，重试成本低）
+            except Exception as e:
                 errors.append(f"{url}（第 {attempt + 1} 次）: {e}")
     tmp.unlink(missing_ok=True)
-    raise RuntimeError(f"所有下载源均失败:\n" + "\n".join(errors))
+    raise RuntimeError("所有下载源均失败:\n" + "\n".join(errors))
 
 
 def ensure_model(name: str, force: bool = False,
-                 progress_callback: Optional[Callable[[int, int], bool]] = None) -> Path:
+                 progress_callback: Callable[[int, int], bool] | None = None) -> Path:
     """确保模型权重已下载且 SHA256 匹配；返回权重路径。
 
     校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过 640MB 全量哈希。
@@ -311,7 +311,7 @@ def ensure_model(name: str, force: bool = False,
         ckpt.unlink()
 
     print(f"下载模型 {name}（{info['description']}）")
-    urls = [info["ckpt_url"]] + list(info.get("mirror_urls", []))
+    urls = [info["ckpt_url"], *info.get("mirror_urls", [])]
     _download(urls, ckpt, progress_callback)
     actual = sha256_of(ckpt)
     if actual != info["sha256"]:
@@ -341,10 +341,11 @@ TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
 TORCH_CUDA_SHA256 = "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30"
 # URL 中 "+" 用 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403，此前
 # 官方回退源一直是坏的；SJTU/阿里云对两种形式均可（与 install.iss 一致）。
+TORCH_CUDA_WHEEL_ENC = TORCH_CUDA_WHEEL.replace("+", "%2B")
 TORCH_CUDA_URLS = [
-    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
-    f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
-    f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL.replace('+', '%2B')}",
+    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
+    f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL_ENC}",
+    f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
 ]
 
 
@@ -355,7 +356,7 @@ def _wheel_cache_dir() -> Path:
     return d
 
 
-def cuda_torch_installed(base: Optional[Path] = None) -> bool:
+def cuda_torch_installed(base: Path | None = None) -> bool:
     """CUDA 引擎是否已安装（{base}/torch_cuda/torch/__init__.py 存在）。"""
     base = Path(base) if base else repo_root()
     return (base / "torch_cuda" / "torch" / "__init__.py").exists()
@@ -383,8 +384,8 @@ def _prune_torch_install(dest: Path) -> None:
                 shutil.rmtree(f, ignore_errors=True)
 
 
-def install_cuda_torch(base: Optional[Path] = None,
-                       progress_callback: Optional[Callable[[int, int], bool]] = None) -> Path:
+def install_cuda_torch(base: Path | None = None,
+                       progress_callback: Callable[[int, int], bool] | None = None) -> Path:
     """下载并安装 CUDA 推理引擎到 {base}/torch_cuda（与应用同目录）。
 
     流程：已安装则直接返回 → _download（多段并发 + 断点续传 + 镜像回退）

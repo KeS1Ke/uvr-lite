@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 goghost-origin.flac 多层面音乐分析
 - 节拍: 谱通量 onset 包络 -> 自相关 + 梳状对齐 -> BPM / 拍相位 / 拍号 / swing
@@ -14,6 +13,8 @@ goghost-origin.flac 多层面音乐分析
 import json
 import os
 import wave
+from itertools import pairwise
+
 import numpy as np
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,9 +213,9 @@ def structure_segments(chroma, S, env, sr, hop, min_gap_s=7.0):
         if nov[i] > th and nov[i] >= nov[i - 1] and nov[i] > nov[i + 1] and (i - last) >= min_gap:
             idxs.append(i)
             last = i
-    bounds = [0] + idxs + [len(nov)]
+    bounds = [0, *idxs, len(nov)]
     segs = []
-    for a, b in zip(bounds[:-1], bounds[1:]):
+    for a, b in pairwise(bounds):
         t0, t1 = a * hop / sr, b * hop / sr
         rms_db = db(np.mean(np.abs(S[a:b]) ** 2))
         cen = spectral_centroid(S[a:b], sr)
@@ -333,14 +334,14 @@ def tempo_refine(env, hop, sr, bpm0):
 def main():
     print("[1/7] 载入音频 ...")
     x, sr, _ = load_wav(MONO_WAV)
-    stereo, ssr, sch = load_wav(STEREO_WAV, mono=False)
+    stereo, _, sch = load_wav(STEREO_WAV, mono=False)
     dur = len(x) / sr
     print(f"     {dur:.1f}s, {sr}Hz")
 
     print("[2/7] STFT + onset 包络 ...")
     S = stft(x)
     env = onset_envelope(S)
-    bpm0, period0, beats0, conf0 = beat_tracking(env, HOP, sr)
+    bpm0, *_ = beat_tracking(env, HOP, sr)
     bpm = tempo_refine(env, HOP, sr, bpm0)
     if bpm != bpm0:
         print(f"     调制频谱修正: {bpm0:.1f} -> {bpm:.1f} BPM")
@@ -354,7 +355,6 @@ def main():
     beats = beats[beats < len(env)]
     conf = np.mean(env[beats]) / (np.mean(env) + 1e-9)
     bpm = round(bpm, 1)
-    beat_times = (beats * HOP / sr).tolist()
     bars_per_beat = 4  # 调制频谱 2:1 家族 + 摇滚惯例 (4/4)
     swing = round(swing_ratio(env, beats, period, sr), 2)
     print(f"     BPM={bpm}  置信度={conf:.2f}  拍号={bars_per_beat}/4  swing={swing}")
@@ -422,9 +422,9 @@ def main():
 
 def write_report(r, dur):
     lines = []
-    lines.append(f"# GO GHOST (King Gnu) — 多层面音乐分析报告\n")
+    lines.append("# GO GHOST (King Gnu) — 多层面音乐分析报告\n")
     lines.append(f"- 文件: `goghost-origin.flac` | 时长 **{dur:.1f}s** | 44.1kHz / 24bit / 立体声")
-    lines.append(f"- 分析方式: numpy 手写 DSP（谱通量 / chromagram / KS 模板 / novelty 分段）\n")
+    lines.append("- 分析方式: numpy 手写 DSP（谱通量 / chromagram / KS 模板 / novelty 分段）\n")
 
     lines.append("## 1. 节拍与节奏\n")
     lines.append("| 指标 | 值 |")

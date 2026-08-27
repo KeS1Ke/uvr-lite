@@ -1,4 +1,3 @@
-# coding: utf-8
 """推理接线的纯逻辑（无 Qt 依赖，可单测）。
 
 - ProgressTracker: 阶段回调 → 文件内进度 0..1
@@ -6,7 +5,6 @@
 - summary_text: 队列结束汇总文案
 """
 
-from typing import List, Optional
 
 
 class ProgressTracker:
@@ -36,7 +34,7 @@ class ProgressTracker:
         return 0.0
 
 
-def estimate_eta(file_seconds: List[float], done: int, total: int, file_pct: float) -> Optional[float]:
+def estimate_eta(file_seconds: list[float], done: int, total: int, file_pct: float) -> float | None:
     """按已完成文件的平均耗时线性估算剩余秒数；无历史返回 None。"""
     if not file_seconds:
         return None
@@ -46,7 +44,7 @@ def estimate_eta(file_seconds: List[float], done: int, total: int, file_pct: flo
     return avg * remaining
 
 
-def summary_text(ok: int, failed: List[str]) -> str:
+def summary_text(ok: int, failed: list[str]) -> str:
     """队列结束汇总文案：全成功或 成功 N/失败 M + 失败清单。"""
     if not failed:
         return f"全部成功：{ok} 个文件。"

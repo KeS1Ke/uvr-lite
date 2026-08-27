@@ -1,4 +1,3 @@
-# coding: utf-8
 """分离任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。
 
 会话复用：run() 开始时创建一个 Separator（模型只加载一次），全部文件共用，
@@ -9,7 +8,6 @@
 """
 
 from pathlib import Path
-from typing import Dict, List
 
 from PySide6.QtCore import QObject, Signal
 
@@ -24,7 +22,7 @@ class SeparationWorker(QObject):
     file_failed = Signal(int, str)     # file_idx, 错误信息
     all_finished = Signal(int, int, bool)  # 成功数, 失败数, 是否取消
 
-    def __init__(self, files: List[Path], out_dir: str, params: Dict):
+    def __init__(self, files: list[Path], out_dir: str, params: dict):
         super().__init__()
         self.files = files
         self.out_dir = out_dir
@@ -50,7 +48,7 @@ class SeparationWorker(QObject):
                 num_overlap=self.params.get("num_overlap"),
                 verbose=False,
             )
-        except Exception as e:  # noqa: BLE001 —— 模型下载/加载失败 → 整个队列失败
+        except Exception as e:
             for idx in range(total):
                 self.file_failed.emit(idx, friendly_error(e))
             self.all_finished.emit(0, total, False)
@@ -76,13 +74,13 @@ class SeparationWorker(QObject):
             except CancelledError:
                 self._cancel = True
                 break
-            except Exception as e:  # noqa: BLE001 —— 单文件失败跳过，继续队列
+            except Exception as e:
                 failed += 1
                 self.file_failed.emit(idx, friendly_error(e))
         self.all_finished.emit(ok, failed, self._cancel)
 
     def _on_progress(self, phase: str, done: int, total: int) -> bool:
-        pct = int(round(self._tracker.on_progress(phase, done, total) * 100))
+        pct = round(self._tracker.on_progress(phase, done, total) * 100)
         self.progress.emit(phase, done, total, self._cur_idx, len(self.files), pct)
         return not self._cancel
 
@@ -109,7 +107,7 @@ class ModelDownloadWorker(QObject):
             self.finished.emit(True, "")
         except InterruptedError:
             self.finished.emit(False, "已取消（支持断点续传，可随时重新下载）")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.finished.emit(False, str(e))
 
     def _cb(self, done: int, total: int) -> bool:
@@ -143,7 +141,7 @@ class CudaTorchWorker(QObject):
             self.finished.emit(True, "")
         except InterruptedError:
             self.finished.emit(False, "已取消（断点续传，可随时重新下载）")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.finished.emit(False, str(e))
 
     def _cb(self, done: int, total: int) -> bool:

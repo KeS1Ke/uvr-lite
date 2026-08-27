@@ -1,10 +1,8 @@
-# coding: utf-8
 """票 3（tdd）：推理接线的纯逻辑——文件内进度映射、ETA 估算、失败汇总。"""
 
 import pytest
 
 from uvr_lite.ui.progress import ProgressTracker, estimate_eta, summary_text
-
 
 # ---------- ProgressTracker：阶段 → 文件内进度 0..1 ----------
 

@@ -1,4 +1,3 @@
-# coding: utf-8
 """票 1 验收：真实模型分离验证进度回调实况。
 
 用法: python scripts/verify_progress.py [--seconds N] [--cancel-at PHASE]

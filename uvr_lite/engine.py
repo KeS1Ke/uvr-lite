@@ -1,4 +1,3 @@
-# coding: utf-8
 """分离引擎：封装 msst/ 推理子集（vendored，来自 ZFTurbo MSST），提供单文件人声/伴奏分离。
 
 流程：soundfile+soxr 读音频（m4a 兜底 audioread）-> 归一化（可选）
@@ -13,8 +12,9 @@ separate_file() 保留为薄封装（每次调用新建会话），兼容旧 API
 import argparse
 import pickle
 import sys
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Callable, List, Optional
 
 import numpy as np
 import soundfile as sf
@@ -94,7 +94,7 @@ def _warmup(model, config, device: str) -> None:
         dummy = torch.zeros(1, n_ch, max(chunk, 2048))
         with torch.inference_mode():
             model(dummy.to(device))
-    except Exception:  # noqa: BLE001 —— 预热非关键路径，失败不阻塞加载
+    except Exception:
         pass
 
 
@@ -137,7 +137,7 @@ class Separator:
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "auto",
-                 batch_size: Optional[int] = None, num_overlap: Optional[int] = None,
+                 batch_size: int | None = None, num_overlap: int | None = None,
                  verbose: bool = True):
         self.model_name = model_name
         self.device = pick_device(device)
@@ -163,8 +163,8 @@ class Separator:
         fmt: str = "auto",  # auto | flac | wav
         bigshifts: int = 1,
         tta: bool = False,
-        progress_callback: Optional[Callable[[str, int, int], bool]] = None,
-    ) -> List[Path]:
+        progress_callback: Callable[[str, int, int], bool] | None = None,
+    ) -> list[Path]:
         """分离单个音频文件，输出 {stem}-vocals 与 {stem}-instrumental 两个文件。
 
         progress_callback(phase, done, total) -> bool：
@@ -219,7 +219,7 @@ class Separator:
         target_key = next(i for i in instruments if i.lower() == target)
         waveforms["instrumental"] = mix_orig - waveforms[target_key]
 
-        written: List[Path] = []
+        written: list[Path] = []
         try:
             for idx, (instr_key, stem_name) in enumerate(
                 [(target_key, target), ("instrumental", "instrumental")], start=1
@@ -229,10 +229,7 @@ class Separator:
                     est = denormalize_audio(est, norm_params)
 
                 peak = float(np.abs(est).max())
-                if fmt == "flac" or (fmt == "auto" and peak <= 1.0):
-                    codec = "flac"
-                else:
-                    codec = "wav"
+                codec = "flac" if (fmt == "flac" or (fmt == "auto" and peak <= 1.0)) else "wav"
 
                 out_path = out_dir / f"{input_path.stem}-{stem_name}.{codec}"
                 sf.write(out_path, est.T, self.sample_rate, subtype=pcm)
@@ -243,10 +240,8 @@ class Separator:
         except CancelledError:
             # 取消：清理已写出的半成品，不留残缺文件
             for p in written:
-                try:
+                with suppress(OSError):
                     p.unlink(missing_ok=True)
-                except OSError:
-                    pass
             raise
         return written
 
@@ -260,11 +255,11 @@ def separate_file(
     fmt: str = "auto",  # auto | flac | wav
     bigshifts: int = 1,
     tta: bool = False,
-    batch_size: Optional[int] = None,
-    num_overlap: Optional[int] = None,
+    batch_size: int | None = None,
+    num_overlap: int | None = None,
     verbose: bool = True,
-    progress_callback: Optional[Callable[[str, int, int], bool]] = None,
-) -> List[Path]:
+    progress_callback: Callable[[str, int, int], bool] | None = None,
+) -> list[Path]:
     """兼容薄封装：每次调用新建会话（模型加载一次）。
 
     批量场景请直接创建 Separator 复用，避免每文件重载 640MB 模型。

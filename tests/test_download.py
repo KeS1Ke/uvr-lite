@@ -1,11 +1,10 @@
-# coding: utf-8
 """票 4（tdd）：模型下载的进度回调、取消续传与多源回退（本地 HTTP 服务）。"""
 
 import hashlib
 import http.server
 import os
+import re
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -15,7 +14,7 @@ DATA = bytes(range(256)) * ((4 << 20) // 256)  # 4 MiB（>1MB 读缓冲，保证
 
 
 class _Handler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *args):  # noqa: N802 —— 静默访问日志
+    def log_message(self, *args):
         pass
 
 
@@ -211,13 +210,11 @@ def test_ensure_model_changed_file_revalidates(fake_download_env):
 
 # ---------- 并行分段下载（Range server） ----------
 
-import re as _re
-
 
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
     """支持 Range 的测试服务器（与阿里云等镜像行为一致：206 + Content-Range）。"""
 
-    def log_message(self, *args):  # noqa: N802
+    def log_message(self, *args):
         pass
 
     def _serve(self, head_only: bool = False) -> None:
@@ -225,7 +222,7 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
         rng = self.headers.get("Range")
         status, body, extra = 200, DATA, {}
         if rng:
-            m = _re.fullmatch(r"bytes=(\d+)-(\d*)", rng)
+            m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng)
             if m:
                 start, end = int(m.group(1)), int(m.group(2) or size - 1)
                 body = DATA[start:end + 1]
@@ -240,10 +237,10 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         self._serve()
 
-    def do_HEAD(self):  # noqa: N802
+    def do_HEAD(self):
         self._serve(head_only=True)
 
 

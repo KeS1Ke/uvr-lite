@@ -1,4 +1,3 @@
-# coding: utf-8
 """uvr-lite 桌面界面主窗口（PySide6）。
 
 票 2：UI 骨架——文件列表（选择文件/选择文件夹/拖拽）、模型与参数表单、
@@ -36,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..download import cuda_torch_installed, models_dir, repo_root
 from ..models import MODEL_REGISTRY
-from .files import AUDIO_EXTS, dedup_paths, is_audio, precheck_audio, scan_audio_files
+from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
 from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationWorker
 
@@ -66,7 +65,7 @@ class ToggleSelectList(QListWidget):
         # SingleSelection 下 setSelected(True) 会清除其他项；Extended 互不影响
         self.setSelectionMode(QListWidget.ExtendedSelection)
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:
         item = self.itemAt(event.position().toPoint())
         if item is not None:
             item.setSelected(not item.isSelected())
@@ -281,11 +280,11 @@ class MainWindow(QMainWindow):
 
     # ---------- 拖拽 ----------
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
+    def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
-    def dropEvent(self, event) -> None:  # noqa: N802
+    def dropEvent(self, event) -> None:
         dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls()]
         files = [p for p in dropped if p.is_file() and is_audio(p)]
         self._add_paths(files)
@@ -409,7 +408,8 @@ class MainWindow(QMainWindow):
             self.btn_cuda.setText("已安装")
             self.btn_cuda.setEnabled(False)
         else:
-            self.label_engine.setText("CUDA 引擎未安装 — 下载约 3.3 GB 后可用 GPU 加速（NVIDIA 显卡）")
+            self.label_engine.setText(
+                "CUDA 引擎未安装 — 下载约 3.3 GB 后可用 GPU 加速（NVIDIA 显卡）")
             self.btn_cuda.setText("下载 CUDA 引擎")
             self.btn_cuda.setEnabled(True)
 
@@ -542,7 +542,8 @@ class MainWindow(QMainWindow):
         eta = estimate_eta(self._file_times, file_idx, file_total, file_pct / 100.0)
         eta_txt = self._fmt_eta(eta) if eta is not None else "计算中…"
         self.label_status.setText(
-            f"处理中 {file_idx + 1}/{file_total} · {PHASE_CN.get(phase, phase)} {file_pct}% · 预计剩余 {eta_txt}"
+            f"处理中 {file_idx + 1}/{file_total} · {PHASE_CN.get(phase, phase)}"
+            f" {file_pct}% · 预计剩余 {eta_txt}"
         )
 
     def _on_file_done(self, file_idx, written) -> None:
@@ -593,7 +594,7 @@ class MainWindow(QMainWindow):
 
     # ---------- 生命周期 ----------
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def closeEvent(self, event) -> None:
         self._save_settings()
         if getattr(self, "_worker", None) is not None and self._thread.isRunning():
             self._worker.cancel()

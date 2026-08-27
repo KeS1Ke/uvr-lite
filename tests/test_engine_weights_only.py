@@ -1,4 +1,3 @@
-# coding: utf-8
 """权重加载安全模式回归：engine 必须以 weights_only=True 加载 ckpt。
 
 fp16-lite 分发格式为纯张量（{"state_dict": {name: Tensor}}），无 pickle

@@ -1,4 +1,3 @@
-# coding: utf-8
 """票 3（tdd）：CLI `uvr-lite install-cuda` 命令接线。"""
 
 from uvr_lite.cli import main

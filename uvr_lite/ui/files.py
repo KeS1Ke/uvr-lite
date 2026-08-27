@@ -1,8 +1,7 @@
-# coding: utf-8
 """输入文件扫描：文件夹添加方式的音频文件发现。"""
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List
 
 # 常见音频格式（librosa/soundfile 可解码的子集）
 AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a"}
@@ -25,7 +24,7 @@ def precheck_audio(path: Path) -> bool:
     try:
         info = sf.info(str(path))
         return info.frames > 0 and info.samplerate > 0
-    except Exception:  # noqa: BLE001 —— 交给 audioread 兜底
+    except Exception:
         pass
     import audioread
 
@@ -33,11 +32,11 @@ def precheck_audio(path: Path) -> bool:
         with audioread.audio_open(str(path)) as f:
             _ = f.duration
         return True
-    except Exception:  # noqa: BLE001 —— NoBackendError/DecodeError/OSError 均视为不可处理
+    except Exception:
         return False
 
 
-def scan_audio_files(folder: Path) -> List[Path]:
+def scan_audio_files(folder: Path) -> list[Path]:
     """扫描文件夹下直接包含的音频文件（非递归），按名称排序。
 
     - 只取顶层文件（不进入子目录），行为可预期
@@ -52,7 +51,7 @@ def scan_audio_files(folder: Path) -> List[Path]:
     )
 
 
-def dedup_paths(paths: Iterable[Path]) -> List[Path]:
+def dedup_paths(paths: Iterable[Path]) -> list[Path]:
     """按解析后绝对路径去重，保持添加顺序。"""
     seen = set()
     result = []

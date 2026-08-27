@@ -1,4 +1,3 @@
-# coding: utf-8
 """SeparationWorker 进度跨文件测试：tracker 每文件重置，杜绝进度回跳。"""
 
 import subprocess

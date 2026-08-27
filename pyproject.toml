@@ -45,3 +45,21 @@ packages = ["uvr_lite", "uvr_lite.ui"]
 [tool.setuptools.package-data]
 uvr_lite = ["configs/*.yaml"]
 "uvr_lite.ui" = ["resources/*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+# msst/ 为 vendored 上游代码：不参与 lint，保持与 ZFTurbo 上游的 diff 能力
+extend-exclude = ["msst", "dist", "graphify-out", "models"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+# 中文注释/字符串里的全角标点会被 RUF001-3 误报为"混淆字符"，属中文项目
+# 噪音（1164 条），整体关闭；代码质量规则不受影响
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# 演示/开发工具脚本：dict() 构造与依赖前序计算的可计算默认值属有意风格；
+# numpy 混型时防御性 int(round()) 转换必要（RUF046 按纯 Python 语义误报）；
+# 长数值表达式一行式可读性优先（E501 放行）
+"scripts/**" = ["C408", "B008", "RUF046", "E501"]

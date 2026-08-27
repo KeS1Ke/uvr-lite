@@ -1,4 +1,3 @@
-# coding: utf-8
 """无控制台启动入口：pythonw.exe -m uvr_lite.ui"""
 
 import sys

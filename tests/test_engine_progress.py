@@ -1,9 +1,9 @@
-# coding: utf-8
 """票 1（tdd）：engine 进度回调 + CancelledError + 半成品清理。
 
 运行（仓库根目录）: python -m pytest tests/test_engine_progress.py -v
 """
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,10 +14,17 @@ import torch
 import torch.nn as nn
 from ml_collections import ConfigDict
 
-from uvr_lite import engine as engine_mod
-from uvr_lite.engine import CancelledError, separate_file
-from utils.model_utils import apply_tta, bigshifts_wrapper, demix
+# msst/ 内的模块以顶层包导入（utils/model_utils 等）；与 engine.py 的
+# sys.path 处理一致，显式声明——避免依赖「先 import engine 才可 import
+# utils」的导入顺序魔法（isort 按字母序重排即断）
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT / "msst") not in sys.path:
+    sys.path.insert(0, str(ROOT / "msst"))
 
+from utils.model_utils import apply_tta, bigshifts_wrapper, demix  # noqa: E402
+
+from uvr_lite import engine as engine_mod  # noqa: E402
+from uvr_lite.engine import CancelledError, separate_file  # noqa: E402
 
 # ---------- 工具 ----------
 
@@ -179,7 +186,7 @@ def test_separator_reuses_model_across_files(tmp_path, monkeypatch):
     sep = Separator(verbose=False)
     sep.separate(str(song1), str(tmp_path / "out"))
     sep.separate(str(song2), str(tmp_path / "out"))
-    assert len(loads) == 1, "两个文件应共用一次模型加载（实际 %d 次）" % len(loads)
+    assert len(loads) == 1, f"两个文件应共用一次模型加载（实际 {len(loads)} 次）"
 
 
 def test_tta_phase_reported(tmp_path):

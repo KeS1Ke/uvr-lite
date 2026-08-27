@@ -1,4 +1,3 @@
-# coding: utf-8
 """票 1（tdd）：CUDA 推理引擎下载安装（install_cuda_torch）。
 
 用本地构造的假 wheel zip（与真实 wheel 同构：torch/ + dist-info/，含
@@ -111,7 +110,9 @@ def test_install_cancel_during_extract(fake_wheel, tmp_path):
         install_cuda_torch(tmp_path / "base", progress_callback=cb)
     assert (fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL).exists()
     # 半成品目录不完整（未全量解压）
-    assert not (tmp_path / "base" / "torch_cuda" / "torch-2.7.1+cu128.dist-info" / "METADATA").exists()
+    assert not (
+        tmp_path / "base" / "torch_cuda" / "torch-2.7.1+cu128.dist-info" / "METADATA"
+    ).exists()
     # 取消后重新安装：不再下载（wheel 已就绪），直接解压完成
     install_cuda_torch(tmp_path / "base")
     assert cuda_torch_installed(tmp_path / "base")

@@ -1,9 +1,7 @@
-# coding: utf-8
 """代码快照复制：项目根 → 安装目录/app（排除开发/测试/缓存产物）。"""
 
 import shutil
 from pathlib import Path
-from typing import Iterable, Set
 
 # 需要复制进安装目录的顶层项（其余一律不复制）
 _INCLUDE = ("uvr_lite", "msst", "pyproject.toml", "README.md")
@@ -18,13 +16,13 @@ _EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".egg-info")
 def _make_ignore(root: Path):
     """copytree ignore 回调：顶层（root 下）排除 _EXCLUDE_DIRS 全部；
     子目录不排除 "models"（msst/models 是代码）。"""
-    def _ignore(dirpath: str, names: list) -> Set[str]:
+    def _ignore(dirpath: str, names: list) -> set[str]:
         top = Path(dirpath) == root
         exclude = _EXCLUDE_DIRS if top else _EXCLUDE_DIRS - {"models"}
         return {n for n in names
                 if n in exclude
                 or n.endswith(_EXCLUDE_SUFFIXES)
-                or (Path(dirpath) / n).is_dir() and n.startswith(".")}
+                or ((Path(dirpath) / n).is_dir() and n.startswith("."))}
     return _ignore
 
 

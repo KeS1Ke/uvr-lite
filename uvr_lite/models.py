@@ -1,4 +1,3 @@
-# coding: utf-8
 """模型注册表：名称 -> 权重/配置/校验信息。
 
 默认模型权重托管于本仓库（KeS1Ke/uvr-lite）的 GitHub Releases：fp16 瘦身版
@@ -8,9 +7,8 @@ scripts/strip_model.py 从原版转换）。原版（TRvlvr/model_repo，UVR 项
 社区训练，MIT 许可使用须署名）。
 """
 
-from typing import Dict
 
-MODEL_REGISTRY: Dict[str, Dict] = {
+MODEL_REGISTRY: dict[str, dict] = {
     "bs_roformer_ep317": {
         "model_type": "bs_roformer",
         "config": "model_bs_roformer_ep_317_sdr_12.9755.yaml",
@@ -29,7 +27,8 @@ MODEL_REGISTRY: Dict[str, Dict] = {
         # fp16 瘦身版 SHA（由 strip_model.py 转换生成）；旧版 fp32 本地缓存
         # 校验不匹配会被自动删除重下（一次性迁移，之后磁盘省 320MB）
         "sha256": "2760037bd59b4227829562b93d665b6e223a8d747fb6aed6b534420e2a92e0a6",
-        "description": "BS-RoFormer ep317（viperx 训练，fp16 瘦身版）：人声/伴奏分离主力模型，SDR ≈ 10.9-12.9 dB",
+        "description": ("BS-RoFormer ep317（viperx 训练，fp16 瘦身版）："
+                        "人声/伴奏分离主力模型，SDR ≈ 10.9-12.9 dB"),
     },
     "mel_band_karaoke": {
         "model_type": "mel_band_roformer",
@@ -50,7 +49,7 @@ MODEL_REGISTRY: Dict[str, Dict] = {
 DEFAULT_MODEL = "bs_roformer_ep317"
 
 
-def get_model_info(name: str) -> Dict:
+def get_model_info(name: str) -> dict:
     if name not in MODEL_REGISTRY:
         known = ", ".join(MODEL_REGISTRY)
         raise KeyError(f"未知模型: {name}（可用: {known}）")

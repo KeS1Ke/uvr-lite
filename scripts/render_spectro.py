@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 """渲染原曲与新作的对数频谱对比图 (Pillow) -> output/spectrogram-*.png"""
 import os
+
 import numpy as np
 from PIL import Image
 

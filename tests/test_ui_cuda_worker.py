@@ -1,10 +1,8 @@
-# coding: utf-8
 """票 2（tdd）：CudaTorchWorker——进度上报、取消、失败与成功信号。"""
 
 import pytest
 from PySide6.QtCore import QCoreApplication
 
-from uvr_lite.ui import worker
 from uvr_lite.ui.worker import CudaTorchWorker
 
 
