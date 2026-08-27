@@ -162,7 +162,7 @@ input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optiona
 ```
 
 - **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
-- **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed** checkpoint (320 MB; `scripts/strip_model.py` converts the original, load-time is transparently cast back to fp32 with an ~-80 dB output difference); the original [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) weights remain as fallback mirrors. SHA256-verified, kept out of git
+- **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed safetensors** file (320 MB; `scripts/strip_model.py` converts the original — half the size, no pickle deserialization surface, load-time is transparently cast back to fp32 with an ~-80 dB output difference). SHA256-verified, kept out of git; the downloader has built-in multi-segment concurrency and retries
 - **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 640 MB checkpoint per file
 - **Layout**
 

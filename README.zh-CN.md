@@ -9,7 +9,7 @@
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 ![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**轻量级人声 / 伴奏分离工具** —— 一个模型文件（约 640 MB），一键安装，输出两个无损音轨。同时提供 **中文桌面界面（Windows）** 与 **命令行**。
+**轻量级人声 / 伴奏分离工具** —— 一个模型文件（约 320 MB），一键安装，输出两个无损音轨。同时提供 **中文桌面界面（Windows）** 与 **命令行**。
 
 ```bash
 uvr-lite separate 歌曲.flac -o output
@@ -162,7 +162,7 @@ uvr-lite install-cuda
 ```
 
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
-- **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身版**（320 MB；`scripts/strip_model.py` 由原版转换，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）；原版 [TRvlvr/model_repo](https://github.com/TRvlvr/model_repo) 权重保留为回退镜像。SHA256 完整性校验，不入 git
+- **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
 - **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 640MB 权重
 - **代码结构**
 
