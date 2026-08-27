@@ -213,11 +213,16 @@ class Separator:
                 progress_cb=lambda done, total: _cb("tta", done, total),
             )
 
-        # instrumental = 原混合 - 目标声部（数学无损）
+        # instrumental = 原混合 - 目标声部（数学无损）。两输入须同域：
+        # vocals 先反归一化回原始域再相减；旧实现混域（原始域减归一化域）
+        # 且写循环对 instrumental 二次 denorm——normalize=True 时输出错误。
         instruments = prefer_target_instrument(self.config)[:]
         target = "vocals" if "vocals" in [i.lower() for i in instruments] else instruments[0]
         target_key = next(i for i in instruments if i.lower() == target)
-        waveforms["instrumental"] = mix_orig - waveforms[target_key]
+        target_wave = waveforms[target_key]
+        if norm_params is not None:
+            target_wave = denormalize_audio(target_wave, norm_params)
+        waveforms["instrumental"] = mix_orig - target_wave
 
         written: list[Path] = []
         try:
@@ -225,7 +230,8 @@ class Separator:
                 [(target_key, target), ("instrumental", "instrumental")], start=1
             ):
                 est = waveforms[instr_key]
-                if norm_params is not None:
+                # instrumental 已在原始域构造，不可再 denorm（会二次缩放）
+                if norm_params is not None and instr_key == target_key:
                     est = denormalize_audio(est, norm_params)
 
                 peak = float(np.abs(est).max())
