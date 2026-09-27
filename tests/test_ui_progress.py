@@ -102,6 +102,11 @@ def test_eta_pct_clamped():
     assert estimate_eta([10.0], done=0, total=1, file_pct=2.0) == 0.0
 
 
+def test_eta_done_reaching_total_does_not_go_negative():
+    assert estimate_eta([10.0], done=1, total=1, file_pct=1.0) == 0.0
+    assert estimate_eta([10.0], done=3, total=2, file_pct=1.0) == 0.0
+
+
 def test_eta_current_file_speed_without_history():
     # 一首歌走了 25% 用了 10 秒：rate=40s/首，剩余 0.75 首 → 30s
     assert estimate_eta([], 0, 1, 0.25, elapsed_current=10) == pytest.approx(30.0)
@@ -109,7 +114,15 @@ def test_eta_current_file_speed_without_history():
 
 def test_eta_current_file_too_early_is_none():
     assert estimate_eta([], 0, 1, 0.01, elapsed_current=10) is None
+    # 0.05 恰是 decode 终点：会把解码/加载耗时外推成整首，必须挡掉
+    assert estimate_eta([], 0, 1, 0.05, elapsed_current=10) is None
     assert estimate_eta([], 0, 1, 0.25, elapsed_current=None) is None
+
+
+def test_eta_current_file_bad_elapsed_is_none():
+    assert estimate_eta([], 0, 1, 0.5, elapsed_current=True) is None
+    assert estimate_eta([], 0, 1, 0.5, elapsed_current=-1.0) is None
+    assert estimate_eta([], 0, 1, 0.5, elapsed_current=float("nan")) is None
 
 
 # ---------- summary_text ----------

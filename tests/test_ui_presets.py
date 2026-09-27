@@ -3,7 +3,7 @@
 import subprocess
 import sys
 
-from uvr_lite.ui.presets import resolve_quality
+from uvr_lite.ui.presets import matching_preset, resolve_quality
 
 
 def test_fast_ignores_manual_values():
@@ -64,3 +64,23 @@ def test_import_presets_does_not_load_torch_or_qt():
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-400:]
+
+
+def test_matching_preset_maps_three_tiers():
+    assert matching_preset(1, 1, False) == "fast"
+    assert matching_preset(2, 1, False) == "standard"
+    assert matching_preset(2, 2, False) == "high"
+
+
+def test_matching_preset_legacy_default_is_standard():
+    """旧版默认 num_overlap=0（沿用模型配置）+ bigshifts=1 + 无 TTA → 标准档。"""
+    assert matching_preset(0, 1, False) == "standard"
+    assert matching_preset(-1, 1, False) == "standard"
+
+
+def test_matching_preset_custom_cases():
+    assert matching_preset(2, 1, True) == "custom"      # 开了 TTA
+    assert matching_preset(3, 4, False) == "custom"     # 数值对不上任何档
+    assert matching_preset(0, 2, False) == "custom"     # 0 只在旧默认（bigshifts=1）才归标准
+    assert matching_preset(None, 1, False) == "custom"  # 非法输入
+

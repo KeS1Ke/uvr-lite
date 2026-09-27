@@ -34,7 +34,12 @@ def resolve_quality(preset: str, overlap: int, bigshifts: int, tta: bool) -> dic
 
 
 def matching_preset(overlap: int, bigshifts: int, tta: bool) -> str:
-    """旧设置能否对上三档。tta 为真，或数值对不上，则视为 custom。"""
+    """旧设置能否对上三档。
+
+    tta 为真，或数值对不上，则视为 custom。旧版默认 num_overlap=0
+    （= 沿用模型配置，主力模型即标准档）、bigshifts=1、未开 TTA：
+    迁移为标准档，避免老用户每次升级都落在「自定义」并自动展开高级选项。
+    """
     if tta:
         return "custom"
     try:
@@ -42,6 +47,8 @@ def matching_preset(overlap: int, bigshifts: int, tta: bool) -> str:
         bs = int(bigshifts)
     except (TypeError, ValueError):
         return "custom"
+    if ov <= 0 and bs == 1:
+        return "standard"
     for key, spec in PRESETS.items():
         if spec["num_overlap"] == ov and spec["bigshifts"] == bs and not spec["tta"]:
             return key

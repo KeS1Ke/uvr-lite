@@ -33,8 +33,9 @@ def _cached_separator(Separator, params: dict):
     """
     model_name = params.get("model_name", DEFAULT_MODEL)
     device = params.get("device", "auto")
-    batch_size = params.get("batch_size")
-    num_overlap = params.get("num_overlap")
+    # 0 与 None 在 engine 里同义（都表示沿用模型配置）；归一化避免重复加载
+    batch_size = params.get("batch_size") or None
+    num_overlap = params.get("num_overlap") or None
     key = (model_name, device, batch_size, num_overlap)
     cached = _SEPARATOR_CACHE.get(key)
     if cached is not None:
@@ -85,7 +86,7 @@ class SeparationWorker(QObject):
         except Exception as e:
             for idx in range(total):
                 self.file_failed.emit(idx, friendly_error(e))
-            self.all_finished.emit(0, total, False)
+            self.all_finished.emit(0, total, self._cancel)
             return
         for idx, f in enumerate(self.files):
             self._cur_idx = idx

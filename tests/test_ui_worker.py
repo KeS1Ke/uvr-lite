@@ -15,6 +15,14 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _clean_separator_cache():
+    """模块级缓存跨用例隔离：默认参数键会留在缓存里影响后续断言。"""
+    clear_separator_cache()
+    yield
+    clear_separator_cache()
+
+
 def test_ui_import_does_not_load_torch():
     """UI 启动路径（ui.main → worker）不得加载 torch。
 
@@ -108,3 +116,90 @@ def test_separator_reused_across_runs(tmp_path, monkeypatch, qapp):
         assert all(kw.get("verbose") is False for kw in inits)
     finally:
         clear_separator_cache()
+
+
+def _fake_engine_separator(monkeypatch, inits):
+    class FakeSeparator:
+        def __init__(self, **kw):
+            inits.append(kw)
+
+        def separate(self, path, out_dir, progress_callback=None, **kw):
+            return [path]
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
+
+
+def test_separator_cache_keeps_only_latest(tmp_path, monkeypatch, qapp):
+    """只保留最近一次会话：切走再切回原参数要重建（避免两套权重同时驻留）。"""
+    inits: list[dict] = []
+    _fake_engine_separator(monkeypatch, inits)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    base = {"model_name": "demo", "device": "cpu", "num_overlap": 2, "bigshifts": 1}
+    SeparationWorker([f], "out", dict(base)).run()
+    SeparationWorker([f], "out", {**base, "num_overlap": 8}).run()
+    SeparationWorker([f], "out", dict(base)).run()
+    assert len(inits) == 3
+
+
+def test_separator_construction_failure_not_cached(tmp_path, monkeypatch, qapp):
+    """构造失败不缓存：逐文件报失败，下一次运行重试构造并成功。"""
+    inits: list[dict] = []
+
+    class FlakySeparator:
+        def __init__(self, **kw):
+            inits.append(kw)
+            if len(inits) == 1:
+                raise RuntimeError("load boom")
+
+        def separate(self, path, out_dir, progress_callback=None, **kw):
+            return [path]
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FlakySeparator)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    params = {"model_name": "demo", "device": "cpu", "num_overlap": 2, "bigshifts": 1}
+
+    failed: list[tuple[int, str]] = []
+    finished1: list[tuple[int, int, bool]] = []
+    w1 = SeparationWorker([f], "out", dict(params))
+    w1.file_failed.connect(lambda idx, err: failed.append((idx, err)))
+    w1.all_finished.connect(lambda ok, total, cancelled: finished1.append((ok, total, cancelled)))
+    w1.run()
+
+    assert len(failed) == 1 and "load boom" in failed[0][1]
+    assert finished1 == [(0, 1, False)]
+
+    done: list[int] = []
+    finished2: list[tuple[int, int, bool]] = []
+    w2 = SeparationWorker([f], "out", dict(params))
+    w2.file_done.connect(lambda idx, written: done.append(idx))
+    w2.all_finished.connect(lambda ok, total, cancelled: finished2.append((ok, total, cancelled)))
+    w2.run()
+
+    assert done == [0] and finished2 == [(1, 0, False)]
+    assert len(inits) == 2
+
+
+def test_cancel_mid_run_reports_cancelled(tmp_path, monkeypatch, qapp):
+    """回调返回 False → 引擎抛 CancelledError → all_finished(..., cancelled=True)。"""
+    from uvr_lite.engine import CancelledError
+
+    class CancellableSeparator:
+        def __init__(self, **kw):
+            pass
+
+        def separate(self, path, out_dir, progress_callback=None, **kw):
+            if not progress_callback("chunk", 1, 1):
+                raise CancelledError("用户取消")
+            return [path]  # pragma: no cover - 取消后不应到达
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", CancellableSeparator)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    w = SeparationWorker([f], "out", {"bigshifts": 1})
+    w.cancel()
+    finished: list[tuple[int, int, bool]] = []
+    w.all_finished.connect(lambda ok, total, cancelled: finished.append((ok, total, cancelled)))
+    w.run()
+    assert finished == [(0, 0, True)]

@@ -5,6 +5,8 @@
 - summary_text: 队列结束汇总文案
 """
 
+import math
+
 
 class ProgressTracker:
     """把引擎的阶段回调（decode/infer/chunk/tta/write）映射为文件内进度。
@@ -56,22 +58,24 @@ def estimate_eta(
     """估算剩余秒数。
 
     有历史耗时：平均耗时 × 剩余文件数（剩余 = (total-done-1) + (1-pct)，
-    pct clamp 到 0..1）。此时忽略 elapsed_current。
+    pct clamp 到 0..1，最小 0）。此时忽略 elapsed_current。
 
-    无历史：没给 elapsed_current，或 file_pct < 0.05，返回 None。
+    无历史：没给 elapsed_current，或 file_pct < 0.10，返回 None（太早期
+    的样本误差大；0.05 恰是 decode 终点，会把解码/加载耗时外推成整首）。
     否则按当前文件速度外推：rate = elapsed_current / pct，返回 rate × 剩余。
     """
     pct_raw = float(file_pct)
     pct = max(0.0, min(pct_raw, 1.0))
-    remaining = (total - done - 1) + (1.0 - pct)
+    remaining = max(0.0, (total - done - 1) + (1.0 - pct))
     if file_seconds:
         avg = sum(file_seconds) / len(file_seconds)
         return avg * remaining
     if (
         elapsed_current is None
-        or pct_raw < 0.05
+        or pct_raw < 0.10
         or isinstance(elapsed_current, bool)
         or not isinstance(elapsed_current, (int, float))
+        or not math.isfinite(elapsed_current)
         or elapsed_current < 0
     ):
         return None

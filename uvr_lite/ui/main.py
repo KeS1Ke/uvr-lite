@@ -234,6 +234,9 @@ class MainWindow(QMainWindow):
             app.setStyle("Fusion")
         self.settings = QSettings("uvr-lite", "uvr-lite")
         self._paths: list[Path] = []
+        # 列表行状态：path -> (前缀, 人声输出路径)。列表重建时按此回放，
+        # 否则新增/移除文件会丢掉已完成标记与「双击打开人声」。
+        self._item_state: dict[str, tuple[str, str]] = {}
         self._applying_preset = False
         self.setWindowTitle("uvr-lite 人声/伴奏分离")
         self.setWindowIcon(QIcon(str(_ICON)))
@@ -406,6 +409,8 @@ class MainWindow(QMainWindow):
         out_row = QHBoxLayout(out_box)
         self.edit_out = QLineEdit(out_box)
         self.edit_out.setPlaceholderText("未选择（默认：当前目录/output）")
+        # 拖放交给主窗口处理；QLineEdit 默认接受拖放会把文件路径吞进输入框
+        self.edit_out.setAcceptDrops(False)
         self.btn_out = QPushButton("选择…", out_box)
         out_row.addWidget(self.edit_out)
         out_row.addWidget(self.btn_out)
@@ -486,16 +491,23 @@ class MainWindow(QMainWindow):
         self.label_status.setText(f"已添加 {added} 个文件，共 {len(self._paths)} 个。")
 
     def _rebuild_list(self) -> None:
-        """按 self._paths 重建列表项（行与 _paths 一一对应，状态前缀保留基础名）。"""
+        """按 self._paths 重建列表项（行与 _paths 一一对应，状态前缀/输出按 _item_state 回放）。"""
         self.list_files.clear()
         for p in self._paths:
             item = QListWidgetItem(p.name, self.list_files)
             item.setData(_ROLE_PATH, str(p))
             item.setToolTip(str(p))
+            prefix, output = self._item_state.get(str(p), ("", ""))
+            if prefix:
+                item.setText(f"{prefix}{p.name}")
+            if output:
+                item.setData(_ROLE_OUTPUT, output)
 
     def _set_item_state(self, path: Path, prefix: str, note: str = "") -> None:
         """更新列表中某文件的显示：prefix 为 ⏳/✓/✗，note 追加说明。"""
         target = str(path)
+        _prefix, output = self._item_state.get(target, ("", ""))
+        self._item_state[target] = (prefix, output)
         for i in range(self.list_files.count()):
             item = self.list_files.item(i)
             if item.data(_ROLE_PATH) == target:
@@ -508,6 +520,8 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         target = str(path)
+        prefix, _output = self._item_state.get(target, ("", ""))
+        self._item_state[target] = (prefix, chosen)
         for i in range(self.list_files.count()):
             item = self.list_files.item(i)
             if item.data(_ROLE_PATH) == target:
@@ -543,11 +557,17 @@ class MainWindow(QMainWindow):
         rows = sorted({i.row() for i in self.list_files.selectedIndexes()}, reverse=True)
         for r in rows:
             del self._paths[r]
+        self._prune_item_state()
         self._rebuild_list()
 
     def _clear_list(self) -> None:
         self._paths.clear()
+        self._item_state.clear()
         self._rebuild_list()
+
+    def _prune_item_state(self) -> None:
+        keep = {str(p) for p in self._paths}
+        self._item_state = {k: v for k, v in self._item_state.items() if k in keep}
 
     def _choose_out_dir(self) -> None:
         start = self.edit_out.text() or str(self.settings.value("last_dir", ""))
@@ -562,6 +582,8 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:
+        if self.btn_cancel.isEnabled():  # 分离进行中不接受拖放
+            return
         dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
         files: list[Path] = []
         saw_dir = False
@@ -572,7 +594,8 @@ class MainWindow(QMainWindow):
                     files.extend(scan_audio_files(p))
                 except OSError:
                     continue
-            elif p.is_file() and is_audio(p):
+            # 与「选择文件→所有文件」保持一致：后缀不在白名单但内容可识别的音频也收
+            elif p.is_file() and (is_audio(p) or precheck_audio(p)):
                 files.append(p)
         if not files:
             if saw_dir:
@@ -671,6 +694,9 @@ class MainWindow(QMainWindow):
             self.label_banner.setText(model_unready_text(model))
 
     def _start_download(self) -> None:
+        if self.btn_cancel.isEnabled():  # 分离进行中，先不启动新的重任务
+            return
+        self.btn_start.setEnabled(False)  # 下载期间不允许开始分离
         model = self.combo_model.currentData()
         self._dl_worker = ModelDownloadWorker(model)
         self._dl_thread = QThread(self)
@@ -707,6 +733,7 @@ class MainWindow(QMainWindow):
         self.dl_progress.setVisible(False)
         self.btn_download.setEnabled(True)
         self.btn_download.setText("下载模型")
+        self.btn_start.setEnabled(not self.btn_cancel.isEnabled())  # 分离未在跑才恢复
         self.btn_download.clicked.disconnect()
         self.btn_download.clicked.connect(self._start_download)
         if ok:
@@ -736,6 +763,9 @@ class MainWindow(QMainWindow):
             self.btn_cuda.setEnabled(True)
 
     def _start_cuda_download(self) -> None:
+        if self.btn_cancel.isEnabled():  # 分离进行中，先不启动下载
+            return
+        self.btn_start.setEnabled(False)  # 下载/解压期间不允许开始分离
         self._cuda_worker = CudaTorchWorker(repo_root())
         self._cuda_thread = QThread(self)
         self._cuda_worker.moveToThread(self._cuda_thread)
@@ -771,6 +801,7 @@ class MainWindow(QMainWindow):
         self.cuda_progress.setVisible(False)
         self.btn_cuda.setEnabled(True)
         self.btn_cuda.setText("下载")
+        self.btn_start.setEnabled(not self.btn_cancel.isEnabled())  # 分离未在跑才恢复
         self.btn_cuda.clicked.disconnect()
         self.btn_cuda.clicked.connect(self._start_cuda_download)
         self._refresh_engine_status()
@@ -849,9 +880,9 @@ class MainWindow(QMainWindow):
         self._out_dir = out_dir
         self._t_start = time.time()
         self._t_file = time.time()
+        self._eta_file_idx = -1  # 首个进度回调时重置 _t_file，排除模型加载耗时
         self._file_times: list[float] = []
         self._failed_names: list[str] = []
-        self._ok_count = 0
         self._ok_paths = ok_paths  # 队列索引 → 文件（列表状态标记用）
         for p in ok_paths:
             self._set_item_state(p, _PREFIX_PENDING)
@@ -867,6 +898,11 @@ class MainWindow(QMainWindow):
             self.label_status.setText("正在取消…")
 
     def _on_progress(self, phase, done, total, file_idx, file_total, file_pct) -> None:
+        if file_idx != self._eta_file_idx:
+            # 本文件首个进度回调：重置计时，避免把 torch 导入/模型加载（可达分钟级）
+            # 算进当前文件速度，外推出严重偏大的 ETA
+            self._eta_file_idx = file_idx
+            self._t_file = time.time()
         global_pct = int((file_idx + file_pct / 100.0) / max(1, file_total) * 100)
         self.progress.bar.setValue(global_pct)
         eta = estimate_eta(
@@ -885,7 +921,6 @@ class MainWindow(QMainWindow):
     def _on_file_done(self, file_idx, written) -> None:
         self._file_times.append(time.time() - self._t_file)
         self._t_file = time.time()
-        self._ok_count += 1
         if 0 <= file_idx < len(self._ok_paths):
             self._set_item_state(self._ok_paths[file_idx], _PREFIX_OK)
             self._remember_output(self._ok_paths[file_idx], written)
@@ -899,6 +934,8 @@ class MainWindow(QMainWindow):
 
     def _on_all_finished(self, ok, failed, cancelled) -> None:
         self._set_busy(False)
+        # run() 返回后线程事件循环仍在跑，不 quit 会每次都泄漏一个 QThread
+        self._thread.quit()
         msg = summary_text(ok, self._failed_names)
         if cancelled:
             msg = f"已取消。{msg}"
@@ -923,27 +960,37 @@ class MainWindow(QMainWindow):
                   self.combo_model, self.combo_quality, self.btn_advanced,
                   self.combo_device, self.combo_format, self.combo_pcm,
                   self.spin_bigshifts, self.spin_batch, self.spin_overlap, self.check_tta,
-                  self.edit_out, self.btn_out):
+                  self.edit_out, self.btn_out, self.btn_download):
             w.setEnabled(not busy)
         self.btn_start.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
         self.progress.setEnabled(busy)
         self.list_files.setEnabled(not busy)
+        self.setAcceptDrops(not busy)  # 运行中不接受拖放，避免打乱列表状态
 
     # ---------- 生命周期 ----------
 
+    @staticmethod
+    def _thread_running(thread) -> bool:
+        """线程是否仍在运行；C++ 对象已被 deleteLater 销毁时按 False 处理。"""
+        try:
+            return thread is not None and thread.isRunning()
+        except RuntimeError:
+            return False
+
     def closeEvent(self, event) -> None:
         self._save_settings()
-        if getattr(self, "_worker", None) is not None and self._thread.isRunning():
+        if self._thread_running(getattr(self, "_thread", None)) and \
+                getattr(self, "_worker", None) is not None:
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
-        if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
+        if self._thread_running(getattr(self, "_dl_thread", None)):
             if getattr(self, "_dl_worker", None) is not None:
                 self._dl_worker.cancel()
             self._dl_thread.quit()
             self._dl_thread.wait(3000)
-        if getattr(self, "_cuda_thread", None) is not None and self._cuda_thread.isRunning():
+        if self._thread_running(getattr(self, "_cuda_thread", None)):
             if getattr(self, "_cuda_worker", None) is not None:
                 self._cuda_worker.cancel()
             self._cuda_thread.quit()
@@ -952,7 +999,7 @@ class MainWindow(QMainWindow):
 
 
 class QProgressBarWrap(QWidget):
-    """进度区（票 3 接线；骨架期仅占位）。"""
+    """进度区：QProgressBar 包装（引擎进度回调 → 全局进度条）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
