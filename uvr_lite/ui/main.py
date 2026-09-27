@@ -1,7 +1,7 @@
-"""uvr-lite 桌面界面主窗口（PySide6）。
+"""uvr-lite 桌面界面（PySide6）。
 
-票 2：UI 骨架——文件列表（选择文件/选择文件夹/拖拽）、模型与参数表单、
-输出目录（QSettings 记忆）、♪ 窗口图标。推理接线在票 3，开始按钮暂禁用。
+面向非专业用户：拖放音频、音质三档，设备/位深/BigShifts 等收进「更多选项」。
+权重是否就绪看注册表 filename（model_file），不要再拼 .ckpt。
 """
 
 import os
@@ -28,14 +28,16 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from ..download import cuda_torch_installed, models_dir, repo_root
+from ..download import cuda_torch_installed, model_file, repo_root
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
+from .presets import matching_preset, resolve_quality
 from .progress import estimate_eta, summary_text
 from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationWorker
 
@@ -51,10 +53,159 @@ MODEL_LABELS = {
 DEVICE_CHOICES = ["auto", "cpu", "cuda"]
 FORMAT_CHOICES = ["auto", "flac", "wav"]
 
+QUALITY_CHOICES = (
+    ("fast", "快速"),
+    ("standard", "标准"),
+    ("high", "高音质"),
+    ("custom", "自定义"),
+)
+QUALITY_HINTS = {
+    "fast": "适合批量，大约快一倍。",
+    "standard": "默认音质，速度和质量比较均衡。",
+    "high": "更慢一点，分离更干净。",
+    "custom": "使用「更多选项」里的重叠窗口、BigShifts 和增强。",
+}
+
 # 列表项状态前缀（显示在文件名前）
 _PREFIX_PENDING = "⏳ "
 _PREFIX_OK = "✓ "
 _PREFIX_BAD = "✗ "
+
+_ROLE_PATH = Qt.UserRole
+_ROLE_OUTPUT = Qt.UserRole + 1
+
+_PRESET_KEYS = {"fast", "standard", "high", "custom"}
+
+APP_QSS = """
+#central { background: #16181d; color: #e8e6e3; }
+QGroupBox {
+  background: #22262e;
+  color: #e8e6e3;
+  border: 1px solid #343a46;
+  border-radius: 8px;
+  margin-top: 14px;
+  padding: 12px 10px 10px 10px;
+  font-weight: 600;
+}
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  left: 12px;
+  padding: 0 6px;
+  color: #e8e6e3;
+  background: #16181d;
+}
+QGroupBox QLabel { font-weight: 400; }
+QLabel { color: #e8e6e3; background: transparent; }
+QLabel#hint { color: #b7b3ad; }
+QLabel#statusLabel { color: #d4d0cb; }
+QPushButton {
+  background: #2c313c;
+  color: #e8e6e3;
+  border: 1px solid #3d4452;
+  border-radius: 6px;
+  padding: 4px 12px;
+  min-height: 32px;
+}
+QPushButton:hover { background: #363d4c; }
+QPushButton:disabled { color: #8a8680; background: #1c1f26; }
+QPushButton#startButton {
+  background: #e0a45c;
+  color: #1a140c;
+  border: none;
+  font-weight: 700;
+  min-height: 36px;
+  padding: 6px 18px;
+}
+QPushButton#startButton:hover { background: #e8b56e; }
+QPushButton#startButton:disabled { background: #6d5a40; color: #2c241c; }
+QPushButton#advancedToggle {
+  background: transparent;
+  color: #e0a45c;
+  border: 1px solid #6a5438;
+  font-weight: 600;
+}
+QPushButton#advancedToggle:hover { background: #2a261f; }
+QPushButton#advancedToggle:checked {
+  background: #2c313c;
+  color: #e8e6e3;
+  border-color: #3d4452;
+}
+QLineEdit, QComboBox, QSpinBox, QListWidget {
+  background: #1b1e25;
+  color: #e8e6e3;
+  border: 1px solid #3d4452;
+  border-radius: 4px;
+  padding: 4px 6px;
+  min-height: 28px;
+  selection-background-color: #4a3b28;
+  selection-color: #f6efe4;
+}
+QComboBox QAbstractItemView {
+  background: #22262e;
+  color: #e8e6e3;
+  selection-background-color: #e0a45c;
+  selection-color: #1a140c;
+}
+QListWidget::item { padding: 4px 6px; }
+QListWidget::item:selected { background: #4a3b28; color: #f6efe4; }
+QListWidget::item:hover { background: #2a303a; }
+QCheckBox { color: #e8e6e3; spacing: 8px; background: transparent; }
+QProgressBar {
+  background: #1b1e25;
+  border: 1px solid #3d4452;
+  border-radius: 4px;
+  text-align: center;
+  color: #e8e6e3;
+  min-height: 18px;
+}
+QProgressBar::chunk { background: #e0a45c; border-radius: 3px; }
+"""
+
+
+def pick_vocal_file(written) -> str | None:
+    """写出结果里优先打开文件名含 vocals 的那条，否则第一条。"""
+    if written is None:
+        return None
+    if isinstance(written, (str, Path)):
+        items = [written]
+    else:
+        try:
+            items = list(written)
+        except TypeError:
+            return None
+    paths = [Path(p) for p in items if p]
+    if not paths:
+        return None
+    chosen = next((p for p in paths if "vocals" in p.name.lower()), paths[0])
+    return str(chosen)
+
+
+def model_unready_text(model: str) -> str:
+    """横幅文案。体积用注册表 size_mb，不要写死 640 MB。"""
+    label = MODEL_LABELS.get(model, str(model))
+    size = MODEL_REGISTRY.get(model, {}).get("size_mb")
+    size_part = f"（约 {size} MB）" if size else ""
+    return f"模型「{label}」还没准备好{size_part}，下载后即可分离。"
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _as_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class ToggleSelectList(QListWidget):
@@ -78,12 +229,18 @@ class ToggleSelectList(QListWidget):
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyle("Fusion")
         self.settings = QSettings("uvr-lite", "uvr-lite")
         self._paths: list[Path] = []
+        self._applying_preset = False
         self.setWindowTitle("uvr-lite 人声/伴奏分离")
         self.setWindowIcon(QIcon(str(_ICON)))
         self.setAcceptDrops(True)
-        self.resize(640, 620)
+        self.setMinimumSize(880, 640)
+        self.resize(980, 720)
+        self.setStyleSheet("QMainWindow { background-color: #16181d; }")
         self._build_ui()
         self._restore_settings()
 
@@ -91,32 +248,58 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget(self)
+        central.setObjectName("central")
+        central.setStyleSheet(APP_QSS)
         root = QVBoxLayout(central)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
 
         # --- 模型状态提示条（缺失时显示，可一键下载）---
         self.banner = QFrame(central)
         self.banner.setObjectName("banner")
         self.banner.setStyleSheet(
-            "QFrame#banner { background: #FFF8DC; border: 1px solid #E6C300; border-radius: 4px; }"
+            "QFrame#banner { background: #c9843a; border: 1px solid #8a5a1e; "
+            "border-radius: 6px; }"
         )
         banner_row = QHBoxLayout(self.banner)
-        banner_row.setContentsMargins(8, 6, 8, 6)
+        banner_row.setContentsMargins(10, 8, 10, 8)
         self.label_banner = QLabel(self.banner)
+        self.label_banner.setWordWrap(True)
+        self.label_banner.setStyleSheet(
+            "color: #1a140c; background: transparent; font-weight: 600;"
+        )
         self.btn_download = QPushButton("下载模型", self.banner)
+        self.btn_download.setStyleSheet(
+            "QPushButton { background: #2a2118; color: #f6efe4; border: none; "
+            "border-radius: 6px; min-height: 32px; padding: 4px 12px; }"
+            "QPushButton:hover { background: #3a2e22; }"
+            "QPushButton:disabled { background: #4a3d30; color: #c4b8a8; }"
+        )
         self.dl_progress = QProgressBar(self.banner)
         self.dl_progress.setFixedWidth(180)
         self.dl_progress.setVisible(False)
-        banner_row.addWidget(self.label_banner)
+        self.dl_progress.setStyleSheet(
+            "QProgressBar { background: #f3e0c4; color: #1a140c; "
+            "border: 1px solid #8a5a1e; border-radius: 4px; text-align: center; }"
+            "QProgressBar::chunk { background: #2a2118; }"
+        )
+        banner_row.addWidget(self.label_banner, 1)
         banner_row.addWidget(self.dl_progress)
         banner_row.addWidget(self.btn_download)
-        banner_row.addStretch(1)
         root.addWidget(self.banner)
         self.btn_download.clicked.connect(self._start_download)
 
         # --- 文件列表 ---
-        file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
+        file_box = QGroupBox("待处理音频", central)
         fl = QVBoxLayout(file_box)
+        file_hint = QLabel("可以把文件或文件夹拖进来。分离完成后，双击某一行打开人声。", file_box)
+        file_hint.setObjectName("hint")
+        file_hint.setWordWrap(True)
+        fl.addWidget(file_hint)
         self.list_files = ToggleSelectList(file_box)
+        self.list_files.setAlternatingRowColors(True)
+        self.list_files.setMinimumHeight(160)
+        self.list_files.itemDoubleClicked.connect(self._on_item_double_clicked)
         fl.addWidget(self.list_files)
         btn_row = QHBoxLayout()
         self.btn_add_files = QPushButton("选择文件…", file_box)
@@ -131,55 +314,92 @@ class MainWindow(QMainWindow):
         self.btn_add_folder.clicked.connect(self._add_folder_dialog)
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear_list)
-        root.addWidget(file_box)
+        root.addWidget(file_box, 1)
 
-        # --- 模型与参数 ---
-        param_box = QGroupBox("参数", central)
-        form = QFormLayout(param_box)
+        # --- 模型与音质（高级项默认折叠）---
+        param_box = QGroupBox("分离", central)
+        param_lay = QVBoxLayout(param_box)
+        top = QFormLayout()
         self.combo_model = QComboBox(param_box)
         for name in MODEL_REGISTRY:
             self.combo_model.addItem(MODEL_LABELS.get(name, name), name)
-        self.combo_device = QComboBox(param_box)
+        self.combo_quality = QComboBox(param_box)
+        for key, label in QUALITY_CHOICES:
+            self.combo_quality.addItem(label, key)
+        self.combo_quality.setCurrentIndex(self.combo_quality.findData("standard"))
+        self.label_quality_hint = QLabel(param_box)
+        self.label_quality_hint.setObjectName("hint")
+        self.label_quality_hint.setWordWrap(True)
+        top.addRow("模型", self.combo_model)
+        top.addRow("音质", self.combo_quality)
+        top.addRow(self.label_quality_hint)
+        param_lay.addLayout(top)
+
+        adv_head = QHBoxLayout()
+        self.btn_advanced = QPushButton("更多选项", param_box)
+        self.btn_advanced.setObjectName("advancedToggle")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setChecked(False)
+        adv_head.addWidget(self.btn_advanced)
+        adv_head.addStretch(1)
+        param_lay.addLayout(adv_head)
+
+        self.advanced_box = QWidget(param_box)
+        adv_form = QFormLayout(self.advanced_box)
+        adv_form.setContentsMargins(0, 6, 0, 0)
+        self.combo_device = QComboBox(self.advanced_box)
         self.combo_device.addItems(DEVICE_CHOICES)
         self.combo_device.currentIndexChanged.connect(self._on_device_changed)
-        self.combo_format = QComboBox(param_box)
+        self.combo_format = QComboBox(self.advanced_box)
         self.combo_format.addItems(FORMAT_CHOICES)
-        self.combo_pcm = QComboBox(param_box)
+        self.combo_pcm = QComboBox(self.advanced_box)
         self.combo_pcm.addItems(["24", "16"])
-        self.spin_bigshifts = QSpinBox(param_box)
+        self.spin_bigshifts = QSpinBox(self.advanced_box)
         self.spin_bigshifts.setRange(1, 8)
-        self.spin_batch = QSpinBox(param_box)
+        self.spin_batch = QSpinBox(self.advanced_box)
         self.spin_batch.setRange(0, 64)
         self.spin_batch.setSpecialValueText("默认（模型配置）")
-        self.spin_overlap = QSpinBox(param_box)
+        self.spin_overlap = QSpinBox(self.advanced_box)
         self.spin_overlap.setRange(0, 8)
         self.spin_overlap.setSpecialValueText("默认（模型配置）")
-        self.check_tta = QCheckBox("测试时增强（3 倍耗时，质量更好）", param_box)
-        form.addRow("模型", self.combo_model)
-        form.addRow("设备", self.combo_device)
-        form.addRow("输出格式", self.combo_format)
-        form.addRow("FLAC 位深", self.combo_pcm)
-        form.addRow("BigShifts 次数", self.spin_bigshifts)
-        form.addRow("批大小（低显存设 1）", self.spin_batch)
-        form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
-        form.addRow("", self.check_tta)
+        self.check_tta = QCheckBox("测试时增强（3 倍耗时，质量更好）", self.advanced_box)
+        self.label_cuda_inline = QLabel(
+            "显卡加速已安装。设备选「自动」时会优先用显卡。", self.advanced_box
+        )
+        self.label_cuda_inline.setWordWrap(True)
+        self.label_cuda_inline.setVisible(False)
+        adv_form.addRow("设备", self.combo_device)
+        adv_form.addRow("输出格式", self.combo_format)
+        adv_form.addRow("FLAC 位深", self.combo_pcm)
+        adv_form.addRow("BigShifts 次数", self.spin_bigshifts)
+        adv_form.addRow("批大小（低显存设 1）", self.spin_batch)
+        adv_form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
+        adv_form.addRow("", self.check_tta)
+        adv_form.addRow(self.label_cuda_inline)
+        self.advanced_box.setVisible(False)
+        param_lay.addWidget(self.advanced_box)
+        self.btn_advanced.toggled.connect(self._on_advanced_toggled)
         root.addWidget(param_box)
 
-        # --- 推理引擎（CPU/CUDA torch）：单包只含 CPU，CUDA 可选下载 ---
-        engine_box = QGroupBox("推理引擎", central)
-        engine_row = QHBoxLayout(engine_box)
+        # --- 推理引擎：未安装时保留下载；已安装则收成高级里的一行 ---
+        engine_box = QGroupBox("显卡加速", central)
+        self.engine_box = engine_box
+        engine_col = QVBoxLayout(engine_box)
         self.label_engine = QLabel(engine_box)
+        self.label_engine.setWordWrap(True)
+        self.label_engine.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        engine_row = QHBoxLayout()
         self.cuda_progress = QProgressBar(engine_box)
         self.cuda_progress.setFixedWidth(180)
         self.cuda_progress.setVisible(False)
         self.btn_cuda = QPushButton(engine_box)
-        engine_row.addWidget(self.label_engine)
         engine_row.addWidget(self.cuda_progress)
         engine_row.addWidget(self.btn_cuda)
         engine_row.addStretch(1)
+        engine_col.addWidget(self.label_engine)
+        engine_col.addLayout(engine_row)
         root.addWidget(engine_box)
         self.btn_cuda.clicked.connect(self._start_cuda_download)
-        self._refresh_engine_status()
 
         # --- 输出目录 ---
         out_box = QGroupBox("输出文件夹", central)
@@ -195,6 +415,8 @@ class MainWindow(QMainWindow):
         # --- 操作区 ---
         action_row = QHBoxLayout()
         self.btn_start = QPushButton("开始分离", central)
+        self.btn_start.setObjectName("startButton")
+        self.btn_start.setMinimumWidth(140)
         self.btn_cancel = QPushButton("取消", central)
         self.btn_cancel.setEnabled(False)
         action_row.addWidget(self.btn_start)
@@ -209,13 +431,50 @@ class MainWindow(QMainWindow):
         root.addWidget(self.progress)
 
         self.label_status = QLabel("就绪。添加音频文件后即可开始。", central)
+        self.label_status.setObjectName("statusLabel")
+        self.label_status.setWordWrap(True)
         root.addWidget(self.label_status)
 
         self.setCentralWidget(central)
 
-        # 控件全部就绪后再挂模型状态联动
+        self.spin_overlap.valueChanged.connect(self._on_manual_quality_tweak)
+        self.spin_bigshifts.valueChanged.connect(self._on_manual_quality_tweak)
+        self.check_tta.toggled.connect(self._on_manual_quality_tweak)
+        self.combo_quality.currentIndexChanged.connect(self._on_quality_changed)
         self.combo_model.currentIndexChanged.connect(self._refresh_model_banner)
+        self._on_quality_changed()
         self._refresh_model_banner()
+        self._refresh_engine_status()
+
+    def _on_advanced_toggled(self, on: bool) -> None:
+        self.advanced_box.setVisible(on)
+        self.btn_advanced.setText("收起选项" if on else "更多选项")
+
+    def _on_quality_changed(self) -> None:
+        preset = self.combo_quality.currentData() or "standard"
+        self.label_quality_hint.setText(QUALITY_HINTS.get(preset, QUALITY_HINTS["standard"]))
+        if preset == "custom":
+            self.btn_advanced.setChecked(True)
+            return
+        resolved = resolve_quality(str(preset), 0, 1, False)
+        blockers = (self.spin_overlap, self.spin_bigshifts, self.check_tta)
+        for w in blockers:
+            w.blockSignals(True)
+        try:
+            overlap = resolved["num_overlap"]
+            self.spin_overlap.setValue(0 if overlap is None else int(overlap))
+            self.spin_bigshifts.setValue(int(resolved["bigshifts"]))
+            self.check_tta.setChecked(bool(resolved["tta"]))
+        finally:
+            for w in blockers:
+                w.blockSignals(False)
+
+    def _on_manual_quality_tweak(self, *_args) -> None:
+        """高级里改了重叠 / BigShifts / TTA，就切到自定义，避免档位把改动盖掉。"""
+        if self._applying_preset:
+            return
+        if self.combo_quality.currentData() != "custom":
+            self._select_data(self.combo_quality, "custom")
 
     # ---------- 文件列表操作 ----------
 
@@ -231,17 +490,35 @@ class MainWindow(QMainWindow):
         self.list_files.clear()
         for p in self._paths:
             item = QListWidgetItem(p.name, self.list_files)
-            item.setData(Qt.UserRole, str(p))
+            item.setData(_ROLE_PATH, str(p))
+            item.setToolTip(str(p))
 
     def _set_item_state(self, path: Path, prefix: str, note: str = "") -> None:
         """更新列表中某文件的显示：prefix 为 ⏳/✓/✗，note 追加说明。"""
         target = str(path)
         for i in range(self.list_files.count()):
             item = self.list_files.item(i)
-            if item.data(Qt.UserRole) == target:
+            if item.data(_ROLE_PATH) == target:
                 base = Path(target).name
                 item.setText(f"{prefix}{base}{note}")
                 return
+
+    def _remember_output(self, path: Path, written) -> None:
+        chosen = pick_vocal_file(written)
+        if not chosen:
+            return
+        target = str(path)
+        for i in range(self.list_files.count()):
+            item = self.list_files.item(i)
+            if item.data(_ROLE_PATH) == target:
+                item.setData(_ROLE_OUTPUT, chosen)
+                return
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        target = item.data(_ROLE_OUTPUT)
+        if not target:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _add_files_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -285,29 +562,70 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:
-        dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls()]
-        files = [p for p in dropped if p.is_file() and is_audio(p)]
+        dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+        files: list[Path] = []
+        saw_dir = False
+        for p in dropped:
+            if p.is_dir():
+                saw_dir = True
+                try:
+                    files.extend(scan_audio_files(p))
+                except OSError:
+                    continue
+            elif p.is_file() and is_audio(p):
+                files.append(p)
+        if not files:
+            if saw_dir:
+                self.label_status.setText("文件夹里没有找到音频文件（mp3/flac/wav/ogg/m4a）。")
+            elif dropped:
+                self.label_status.setText("没有可添加的音频文件。")
+            return
         self._add_paths(files)
+        event.acceptProposedAction()
 
     # ---------- 参数记忆 ----------
 
+    def _preset_from_settings(self) -> str:
+        """记住的音质档。没有该键的旧用户：对不上三档或开了 TTA 则自定义。"""
+        s = self.settings
+        saved = s.value("quality_preset", "")
+        saved = "" if saved is None else str(saved)
+        if saved in _PRESET_KEYS:
+            return saved
+        legacy = any(s.contains(k) for k in ("num_overlap", "bigshifts", "tta"))
+        if not legacy:
+            return "standard"
+        return matching_preset(
+            _as_int(s.value("num_overlap", 0), 0),
+            _as_int(s.value("bigshifts", 1), 1),
+            _as_bool(s.value("tta", False)),
+        )
+
     def _restore_settings(self) -> None:
         s = self.settings
-        self._select_data(self.combo_model, s.value("model", "bs_roformer_ep317"))
-        self._select_data(self.combo_device, s.value("device", "auto"))
-        self._select_data(self.combo_format, s.value("format", "auto"))
-        self._select_data(self.combo_pcm, str(s.value("pcm", "24")))
-        self.spin_bigshifts.setValue(int(s.value("bigshifts", 1)))
-        self.spin_batch.setValue(int(s.value("batch_size", 0)))
-        self.spin_overlap.setValue(int(s.value("num_overlap", 0)))
-        self.check_tta.setChecked(bool(s.value("tta", False)))
-        out = s.value("out_dir", "")
-        if out:
-            self.edit_out.setText(str(out))
+        self._applying_preset = True
+        try:
+            self._select_data(self.combo_model, s.value("model", "bs_roformer_ep317"))
+            self._select_data(self.combo_device, s.value("device", "auto"))
+            self._select_data(self.combo_format, s.value("format", "auto"))
+            self._select_data(self.combo_pcm, str(s.value("pcm", "24")))
+            self.spin_bigshifts.setValue(_as_int(s.value("bigshifts", 1), 1))
+            self.spin_batch.setValue(_as_int(s.value("batch_size", 0), 0))
+            self.spin_overlap.setValue(_as_int(s.value("num_overlap", 0), 0))
+            self.check_tta.setChecked(_as_bool(s.value("tta", False)))
+            out = s.value("out_dir", "")
+            if out:
+                self.edit_out.setText(str(out))
+            self._select_data(self.combo_quality, self._preset_from_settings())
+        finally:
+            self._applying_preset = False
+        # 索引没变时 currentIndexChanged 不会响，这里补一次，把标准档写成 overlap=2
+        self._on_quality_changed()
 
     def _save_settings(self) -> None:
         s = self.settings
         s.setValue("model", self.combo_model.currentData())
+        s.setValue("quality_preset", self.combo_quality.currentData() or "standard")
         s.setValue("device", self.combo_device.currentText())
         s.setValue("format", self.combo_format.currentText())
         s.setValue("pcm", self.combo_pcm.currentText())
@@ -341,17 +659,16 @@ class MainWindow(QMainWindow):
                     f"use={self.combo_device.currentText()}\n", encoding="utf-8")
             except OSError:
                 return
-            self.label_status.setText("推理引擎已切换，重启 uvr-lite 后生效。")
+            self.label_status.setText("推理引擎切换后，重启 uvr-lite 才会生效。")
 
     # ---------- 模型下载 ----------
 
     def _refresh_model_banner(self) -> None:
         model = self.combo_model.currentData()
-        ready = (models_dir() / f"{model}.ckpt").exists()
+        ready = model_file(model).exists()
         self.banner.setVisible(not ready)
         if not ready:
-            label = MODEL_LABELS.get(model, model)
-            self.label_banner.setText(f"模型「{label}」未下载（约 640 MB），下载后即可开始分离。")
+            self.label_banner.setText(model_unready_text(model))
 
     def _start_download(self) -> None:
         model = self.combo_model.currentData()
@@ -402,15 +719,20 @@ class MainWindow(QMainWindow):
     # ---------- CUDA 引擎下载 ----------
 
     def _refresh_engine_status(self) -> None:
-        """按安装状态刷新「推理引擎」区：已装 / 可下载。"""
+        """已安装：收成高级里的一行。未安装：保留下载按钮。"""
         if cuda_torch_installed():
-            self.label_engine.setText("CUDA 引擎已安装 ✓（设备选「自动」将优先 GPU 加速）")
+            self.engine_box.setVisible(False)
+            self.label_cuda_inline.setVisible(True)
+            self.label_engine.setText("显卡加速已安装。设备选「自动」时会优先用显卡。")
             self.btn_cuda.setText("已安装")
             self.btn_cuda.setEnabled(False)
         else:
+            self.engine_box.setVisible(True)
+            self.label_cuda_inline.setVisible(False)
             self.label_engine.setText(
-                "CUDA 引擎未安装 — 下载约 3.3 GB 后可用 GPU 加速（NVIDIA 显卡）")
-            self.btn_cuda.setText("下载 CUDA 引擎")
+                "这台电脑还不能用 NVIDIA 显卡加速。下载约 3.3 GB，装完需要重启。"
+            )
+            self.btn_cuda.setText("下载")
             self.btn_cuda.setEnabled(True)
 
     def _start_cuda_download(self) -> None:
@@ -448,7 +770,7 @@ class MainWindow(QMainWindow):
         self._cuda_thread.wait(3000)
         self.cuda_progress.setVisible(False)
         self.btn_cuda.setEnabled(True)
-        self.btn_cuda.setText("下载 CUDA 引擎")
+        self.btn_cuda.setText("下载")
         self.btn_cuda.clicked.disconnect()
         self.btn_cuda.clicked.connect(self._start_cuda_download)
         self._refresh_engine_status()
@@ -466,10 +788,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先添加音频文件（选择文件/文件夹或拖拽）。")
             return
         model = self.combo_model.currentData()
-        if not (models_dir() / f"{model}.ckpt").exists():
+        if not model_file(model).exists():
+            size = MODEL_REGISTRY.get(model, {}).get("size_mb")
+            size_part = f"（约 {size} MB）" if size else ""
             QMessageBox.information(
-                self, "模型未下载",
-                "请先点击顶部「下载模型」按钮下载权重（约 640 MB），再开始分离。")
+                self, "模型还没准备好",
+                f"请先点击顶部「下载模型」按钮下载权重{size_part}，再开始分离。")
             self._refresh_model_banner()
             return
         out_dir = self.edit_out.text().strip() or str(Path.cwd() / "output")
@@ -495,15 +819,21 @@ class MainWindow(QMainWindow):
                                 "所选文件都无法识别为音频格式，请检查文件是否损坏。")
             return
 
+        quality = resolve_quality(
+            self.combo_quality.currentData() or "standard",
+            self.spin_overlap.value(),
+            self.spin_bigshifts.value(),
+            self.check_tta.isChecked(),
+        )
         params = {
-            "model_name": self.combo_model.currentData(),
+            "model_name": model,
             "device": self.combo_device.currentText(),
             "fmt": self.combo_format.currentText(),
             "pcm": f"PCM_{self.combo_pcm.currentText()}",
-            "bigshifts": self.spin_bigshifts.value(),
+            "bigshifts": quality["bigshifts"],
             "batch_size": self.spin_batch.value() or None,
-            "num_overlap": self.spin_overlap.value() or None,
-            "tta": self.check_tta.isChecked(),
+            "num_overlap": quality["num_overlap"],
+            "tta": quality["tta"],
         }
         self._worker = SeparationWorker(list(ok_paths), out_dir, params)
         self._thread = QThread(self)
@@ -539,7 +869,13 @@ class MainWindow(QMainWindow):
     def _on_progress(self, phase, done, total, file_idx, file_total, file_pct) -> None:
         global_pct = int((file_idx + file_pct / 100.0) / max(1, file_total) * 100)
         self.progress.bar.setValue(global_pct)
-        eta = estimate_eta(self._file_times, file_idx, file_total, file_pct / 100.0)
+        eta = estimate_eta(
+            self._file_times,
+            file_idx,
+            file_total,
+            file_pct / 100.0,
+            elapsed_current=time.time() - self._t_file,
+        )
         eta_txt = self._fmt_eta(eta) if eta is not None else "计算中…"
         self.label_status.setText(
             f"处理中 {file_idx + 1}/{file_total} · {PHASE_CN.get(phase, phase)}"
@@ -552,6 +888,7 @@ class MainWindow(QMainWindow):
         self._ok_count += 1
         if 0 <= file_idx < len(self._ok_paths):
             self._set_item_state(self._ok_paths[file_idx], _PREFIX_OK)
+            self._remember_output(self._ok_paths[file_idx], written)
 
     def _on_file_failed(self, file_idx, error) -> None:
         name = self._ok_paths[file_idx].name
@@ -583,7 +920,8 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
-                  self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
+                  self.combo_model, self.combo_quality, self.btn_advanced,
+                  self.combo_device, self.combo_format, self.combo_pcm,
                   self.spin_bigshifts, self.spin_batch, self.spin_overlap, self.check_tta,
                   self.edit_out, self.btn_out):
             w.setEnabled(not busy)
@@ -640,6 +978,7 @@ def run() -> int:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("uvr-lite")
     app = QApplication(sys.argv)
     app.setApplicationName("uvr-lite")
+    app.setStyle("Fusion")
     app.setWindowIcon(QIcon(str(_ICON)))
     win = MainWindow()
     win.show()
