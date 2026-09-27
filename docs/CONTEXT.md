@@ -7,13 +7,13 @@
 | 术语 | 定义 |
 |---|---|
 | **分离（separate）** | 将一段混合音频拆成两条音轨：人声（vocals）与伴奏（instrumental）。伴奏 = 原曲 − 人声（数学无损）。 |
-| **模型（model）** | 训练好的分离网络权重（`.ckpt`）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
+| **模型（model）** | 训练好的分离网络权重（`.safetensors`，fp16 瘦身）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
 | **引擎（engine）** | `uvr_lite/engine.py` 的分离执行层，提供 `separate_file()` 纯函数接口（输入/输出/参数）。 |
 | **进度回调（progress_callback）** | 引擎向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。 |
 | **取消（cancel）** | 用户中止当前任务。引擎收到回调返回 `False` 后抛 `CancelledError`；UI 清理半成品输出。 |
 | **半成品清理** | 取消后删除未写完的输出文件（`*-vocals.*` / `*-instrumental.*`），不留残缺文件。 |
 | **任务队列（queue）** | UI 中待处理音频的列表。**两种添加方式**：选择文件（多选/拖拽）或选择输入文件夹（扫描其中常见音频格式 mp3/flac/wav/ogg/m4a，默认不递归、去重追加）。按添加顺序逐个处理；单文件失败跳过继续，结束汇总"成功 N / 失败 M"。 |
-| **ETA** | 预计剩余时间，按已完成文件的平均速度线性估算。 |
+| **ETA** | 预计剩余时间：有已完成文件时按其平均耗时线性估算；首个文件无历史时按当前文件已用时间外推（从首个进度回调开始计时，不含模型加载/预热）。 |
 | **UI 外包装** | 面向非专业用户的 PySide6 桌面界面，进程内调用引擎，不改变 CLI 行为。 |
 | **全量安装包** | Inno Setup 7 制作的标准安装程序（`installer/install.iss`）：代码快照 + 内置绿色 Python（含全部依赖）+ CPU/CUDA 双 torch + 模型权重全部内置，用户安装即用、无需联网。 |
 | **推理引擎切换** | 安装包内 torch_cpu/ 与 torch_cuda/ 两套独立 torch，应用内选择（自动/CPU/CUDA）写 `torch.ini`，启动时 `uvr_lite/__init__.py` 把对应目录插入 sys.path（重启生效）。 |

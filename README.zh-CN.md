@@ -151,6 +151,7 @@ uvr-lite install-cuda
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
 - **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.9 GB
 - **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
+- **CUDA 加速**：模型加载只做一次短预热（开销与旧版一致）。仅在装有 triton 的 CUDA 环境（Linux）尝试 `torch.compile`；Windows 官方 torch 不带 triton，会自动跳过——可用 `UVR_COMPILE=0` 显式关闭
 
 ## 工作原理
 
@@ -163,7 +164,7 @@ uvr-lite install-cuda
 
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
 - **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
-- **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 640MB 权重
+- **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 320MB 权重
 - **代码结构**
 
 ```
