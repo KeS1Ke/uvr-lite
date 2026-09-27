@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import __version__
-from .download import ensure_model, models_dir
+from .download import ensure_model, model_file
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
 
@@ -66,7 +66,7 @@ def _cmd_models(args: argparse.Namespace) -> int:
     print(f"{'名称':<20} {'类型':<18} 状态")
     print("-" * 64)
     for name, info in MODEL_REGISTRY.items():
-        ckpt = models_dir() / f"{name}.ckpt"
+        ckpt = model_file(name)
         status = f"{ckpt.stat().st_size / 1e6:.0f} MB" if ckpt.exists() else "未下载"
         print(f"{name:<20} {info['model_type']:<18} {status}")
         print(f"  {info['description']}")

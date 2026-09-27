@@ -4,14 +4,14 @@ import subprocess
 import sys
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 
-from uvr_lite.ui.worker import SeparationWorker
+from uvr_lite.ui.worker import SeparationWorker, clear_separator_cache
 
 
 @pytest.fixture(scope="module")
 def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     yield app
 
 
@@ -73,3 +73,38 @@ def test_progress_monotonic_within_file(tmp_path, monkeypatch, qapp):
     progress = _run_two_files(monkeypatch, [f1], {"bigshifts": 1})
     pcts = [pct for _, _, pct in progress]
     assert pcts == sorted(pcts), f"文件内进度应单调: {pcts}"
+
+
+def test_separator_reused_across_runs(tmp_path, monkeypatch, qapp):
+    """同一进程里重复点「开始」：相同构造参数只 load 一次；num_overlap 变了再构造。"""
+    clear_separator_cache()
+    inits: list[dict] = []
+
+    class FakeSeparator:
+        def __init__(self, **kw):
+            inits.append(kw)
+
+        def separate(self, path, out_dir, progress_callback=None, **kw):
+            return [path]
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    params = {
+        "model_name": "demo",
+        "device": "cpu",
+        "batch_size": 4,
+        "num_overlap": 2,
+        "bigshifts": 1,
+    }
+    try:
+        SeparationWorker([f], "out", params).run()
+        SeparationWorker([f], "out", dict(params)).run()
+        assert len(inits) == 1
+        SeparationWorker([f], "out", {**params, "num_overlap": 8}).run()
+        assert len(inits) == 2
+        assert inits[0]["num_overlap"] == 2
+        assert inits[1]["num_overlap"] == 8
+        assert all(kw.get("verbose") is False for kw in inits)
+    finally:
+        clear_separator_cache()

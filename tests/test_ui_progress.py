@@ -1,4 +1,4 @@
-"""票 3（tdd）：推理接线的纯逻辑——文件内进度映射、ETA 估算、失败汇总。"""
+"""票 3a/3b：推理接线的纯逻辑——文件内进度映射、ETA 估算、失败汇总。"""
 
 import pytest
 
@@ -13,29 +13,60 @@ def test_decode_phase():
 
 
 def test_bigshifts1_chunk_then_infer():
+    """默认 tta=False：推理占 90%，chunk(0,…) 停在 decode 终点 5%。"""
     t = ProgressTracker(bigshifts=1)
-    assert t.on_progress("chunk", 1, 3) == pytest.approx(0.20)
-    assert t.on_progress("chunk", 2, 3) == pytest.approx(0.35)
-    assert t.on_progress("chunk", 3, 3) == pytest.approx(0.50)
-    assert t.on_progress("infer", 1, 1) == pytest.approx(0.50)  # 单 pass 完成，与 chunk 终点衔接
+    assert t.on_progress("chunk", 0, 100) == pytest.approx(0.05)
+    assert t.on_progress("chunk", 1, 3) == pytest.approx(0.35)
+    assert t.on_progress("chunk", 2, 3) == pytest.approx(0.65)
+    assert t.on_progress("chunk", 3, 3) == pytest.approx(0.95)
+    assert t.on_progress("infer", 1, 1) == pytest.approx(0.95)  # 单 pass 完成，与 chunk 终点衔接
 
 
-def test_bigshifts4_multi_pass_monotonic():
-    t = ProgressTracker(bigshifts=4)
+def _bigshifts4_values(t: ProgressTracker) -> list[float]:
     seq = [
         ("chunk", 1, 3), ("chunk", 3, 3),   # pass 1 内部
         ("infer", 1, 4),                     # pass 1 完成
         ("chunk", 1, 3), ("chunk", 3, 3),   # pass 2 内部（应从更高起点继续）
         ("infer", 4, 4),                     # 全部 pass 完成
     ]
-    values = [t.on_progress(p, d, tot) for p, d, tot in seq]
+    return [t.on_progress(p, d, tot) for p, d, tot in seq]
+
+
+def test_bigshifts4_multi_pass_monotonic():
+    t = ProgressTracker(bigshifts=4)  # tta=False，推理终点 0.95
+    values = _bigshifts4_values(t)
+    assert values == sorted(values), f"跨 pass 进度必须单调: {values}"
+    assert values[3] < values[4], "pass 2 的 chunk 应从 pass 1 之后继续"
+    assert values[-1] == pytest.approx(0.95)
+
+
+def test_bigshifts4_tta_true_legacy_endpoint():
+    t = ProgressTracker(bigshifts=4, tta=True)
+    values = _bigshifts4_values(t)
     assert values == sorted(values), f"跨 pass 进度必须单调: {values}"
     assert values[3] < values[4], "pass 2 的 chunk 应从 pass 1 之后继续"
     assert values[-1] == pytest.approx(0.50)
 
 
-def test_tta_and_write():
+def test_write_without_tta():
     t = ProgressTracker()
+    assert t.on_progress("write", 1, 2) == pytest.approx(0.975)
+    assert t.on_progress("write", 2, 2) == pytest.approx(1.0)
+
+
+def test_tta_phase_idle_when_disabled():
+    """不开 TTA 时 tta 权重为 0，阶段停在推理终点 0.95。"""
+    t = ProgressTracker()
+    assert t.on_progress("tta", 1, 2) == pytest.approx(0.95)
+    assert t.on_progress("tta", 2, 2) == pytest.approx(0.95)
+
+
+def test_tta_true_legacy_weights():
+    t = ProgressTracker(bigshifts=1, tta=True)
+    assert t.on_progress("chunk", 1, 3) == pytest.approx(0.20)
+    assert t.on_progress("chunk", 2, 3) == pytest.approx(0.35)
+    assert t.on_progress("chunk", 3, 3) == pytest.approx(0.50)
+    assert t.on_progress("infer", 1, 1) == pytest.approx(0.50)
     assert t.on_progress("tta", 1, 2) == pytest.approx(0.70)
     assert t.on_progress("tta", 2, 2) == pytest.approx(0.90)
     assert t.on_progress("write", 1, 2) == pytest.approx(0.95)
@@ -44,6 +75,7 @@ def test_tta_and_write():
 
 def test_unknown_phase_returns_zero():
     assert ProgressTracker().on_progress("unknown", 1, 1) == 0.0
+    assert ProgressTracker(tta=True).on_progress("unknown", 1, 1) == 0.0
 
 
 # ---------- estimate_eta ----------
@@ -56,6 +88,10 @@ def test_eta_remaining_files_and_current_fraction():
     # 已完成 2 首各 60s；当前第 3 首完成 50%；共 5 首
     # 剩余 = 2 首未开始 + 当前 50% = 2.5 首 → 150s
     assert estimate_eta([60.0, 60.0], done=2, total=5, file_pct=0.5) == pytest.approx(150.0)
+    # 有历史时忽略当前文件已耗时
+    assert estimate_eta(
+        [60.0, 60.0], done=2, total=5, file_pct=0.5, elapsed_current=1.0,
+    ) == pytest.approx(150.0)
 
 
 def test_eta_last_file():
@@ -64,6 +100,16 @@ def test_eta_last_file():
 
 def test_eta_pct_clamped():
     assert estimate_eta([10.0], done=0, total=1, file_pct=2.0) == 0.0
+
+
+def test_eta_current_file_speed_without_history():
+    # 一首歌走了 25% 用了 10 秒：rate=40s/首，剩余 0.75 首 → 30s
+    assert estimate_eta([], 0, 1, 0.25, elapsed_current=10) == pytest.approx(30.0)
+
+
+def test_eta_current_file_too_early_is_none():
+    assert estimate_eta([], 0, 1, 0.01, elapsed_current=10) is None
+    assert estimate_eta([], 0, 1, 0.25, elapsed_current=None) is None
 
 
 # ---------- summary_text ----------
