@@ -1,7 +1,9 @@
 """分离任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。
 
-会话复用：run() 开始时创建一个 Separator（模型只加载一次），全部文件共用，
-避免每文件重载 640MB 模型（批量场景的主要提速点）。
+会话复用：同一进程内按 (model_name, device, batch_size, num_overlap) 缓存
+Separator。run() 未命中或上次构造失败才重新构造（失败不入缓存，仍对每个
+文件 file_failed）；命中则直接复用。一次任务内全部文件共用该实例，避免
+重复加载 640MB 模型。换引擎或测试隔离时调用 clear_separator_cache()。
 
 引擎惰性导入：worker 模块只依赖 Qt/轻量模块，torch（约 2-6s 导入 + 上 GB
 内存）推迟到首个分离任务才加载——UI 启动、列表编辑零引擎开销。
@@ -13,6 +15,41 @@ from PySide6.QtCore import QObject, Signal
 
 from ..models import DEFAULT_MODEL
 from .progress import ProgressTracker
+
+# 进程内 Separator 会话：(model_name, device, batch_size, num_overlap) → 实例
+_SEPARATOR_CACHE: dict[tuple, object] = {}
+
+
+def clear_separator_cache() -> None:
+    """丢掉已缓存的 Separator（测试隔离 / 换引擎后调用）。run() 不会自动清。"""
+    _SEPARATOR_CACHE.clear()
+
+
+def _cached_separator(Separator, params: dict):
+    """按构造参数取 Separator：命中复用，未命中则构造并缓存。构造失败不缓存。
+
+    只保留最近一次成功加载的会话。换模型或重叠窗口时先丢掉旧实例，
+    避免两套 640MB 权重同时留在内存里。
+    """
+    model_name = params.get("model_name", DEFAULT_MODEL)
+    device = params.get("device", "auto")
+    batch_size = params.get("batch_size")
+    num_overlap = params.get("num_overlap")
+    key = (model_name, device, batch_size, num_overlap)
+    cached = _SEPARATOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    for stale in list(_SEPARATOR_CACHE):
+        del _SEPARATOR_CACHE[stale]
+    sep = Separator(
+        model_name=model_name,
+        device=device,
+        batch_size=batch_size,
+        num_overlap=num_overlap,
+        verbose=False,
+    )
+    _SEPARATOR_CACHE[key] = sep
+    return sep
 
 
 class SeparationWorker(QObject):
@@ -29,7 +66,10 @@ class SeparationWorker(QObject):
         self.params = params
         self._cancel = False
         self._cur_idx = 0
-        self._tracker = ProgressTracker(params.get("bigshifts", 1))
+        self._tracker = ProgressTracker(
+            self.params.get("bigshifts", 1),
+            tta=bool(self.params.get("tta", False)),
+        )
 
     def cancel(self) -> None:
         self._cancel = True
@@ -41,13 +81,7 @@ class SeparationWorker(QObject):
         ok = failed = 0
         total = len(self.files)
         try:
-            sep = Separator(
-                model_name=self.params.get("model_name", DEFAULT_MODEL),
-                device=self.params.get("device", "auto"),
-                batch_size=self.params.get("batch_size"),
-                num_overlap=self.params.get("num_overlap"),
-                verbose=False,
-            )
+            sep = _cached_separator(Separator, self.params)
         except Exception as e:
             for idx in range(total):
                 self.file_failed.emit(idx, friendly_error(e))
@@ -55,9 +89,12 @@ class SeparationWorker(QObject):
             return
         for idx, f in enumerate(self.files):
             self._cur_idx = idx
-            # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从 50% 起算、
+            # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从推理中途起算、
             # infer 回调再把进度打回（进度条回跳）
-            self._tracker = ProgressTracker(self.params.get("bigshifts", 1))
+            self._tracker = ProgressTracker(
+                self.params.get("bigshifts", 1),
+                tta=bool(self.params.get("tta", False)),
+            )
             if self._cancel:
                 break
             try:
