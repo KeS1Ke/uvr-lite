@@ -1,14 +1,14 @@
 """票 2（tdd）：CudaTorchWorker——进度上报、取消、失败与成功信号。"""
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 
 from uvr_lite.ui.worker import CudaTorchWorker
 
 
 @pytest.fixture(scope="module")
 def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     yield app
 
 
