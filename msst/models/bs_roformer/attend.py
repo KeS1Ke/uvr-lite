@@ -61,9 +61,18 @@ class Attend(nn.Module):
         device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
         device_version = version.parse(f'{device_properties.major}.{device_properties.minor}')
 
+        # 运行期探测 flash 内核是否真的可用：Windows 官方 wheel 未编译 cutlass
+        # flash，仅按 sm>=8.0 开 enable_flash 是空转（实测后端仍是 mem-efficient，
+        # 且曾把 cuDNN SDPA 排到前面反而慢 ~20%）。不可用时退回 mem-efficient+math。
+        flash_available = getattr(torch.backends.cuda, 'is_flash_attention_available', lambda: True)()
+
         if device_version >= version.parse('8.0'):
-            print_once('GPU Compute Capability equal or above 8.0, using flash attention with mem-efficient and math fallback if input tensor is on cuda')
-            self.cuda_config = FlashAttentionConfig(True, True, True)
+            if flash_available:
+                print_once('GPU Compute Capability equal or above 8.0, using flash attention with mem-efficient and math fallback if input tensor is on cuda')
+                self.cuda_config = FlashAttentionConfig(True, True, True)
+            else:
+                print_once('GPU Compute Capability equal or above 8.0 but flash attention kernel is unavailable, using mem-efficient attention with math fallback if input tensor is on cuda')
+                self.cuda_config = FlashAttentionConfig(False, True, True)
         else:
             print_once('GPU Compute Capability below 8.0, using math or mem efficient attention if input tensor is on cuda')
             self.cuda_config = FlashAttentionConfig(False, True, True)

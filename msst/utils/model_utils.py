@@ -72,6 +72,25 @@ def bigshifts_wrapper(
     return np.mean(results, axis=0)
 
 
+def _get_accumulation_device(device: torch.device, num_instruments: int,
+                             mix: torch.Tensor) -> torch.device:
+    """result/counter 累加器放哪：CUDA 显存不足时回落 CPU。
+
+    累加器是 O(音频时长) 的（result (K,C,N) + counter (N)，再叠加
+    result/counter 的临时张量）；1 小时立体声约 3.8 GiB，长音频全放显存
+    有 OOM 风险。所需显存 < 当前空闲的 50% 才放 GPU，否则回落 CPU
+    （此时每块多一次拷贝，但任意长度都稳）。
+    """
+    if device.type != "cuda":
+        return device
+    try:
+        free, _total = torch.cuda.mem_get_info(device)
+    except Exception:
+        return device
+    needed = (num_instruments + 1) * mix.numel() * 4 * 1.5
+    return device if needed < free * 0.5 else torch.device("cpu")
+
+
 def demix(
     config: ConfigDict,
     model: torch.nn.Module,
@@ -136,104 +155,115 @@ def demix(
         step = chunk_size // num_overlap
         border = chunk_size - step
         length_init = mix.shape[-1]
-        windowing_array = _getWindowingArray(chunk_size, fade_size).to(dev)
+        windowing_array = _getWindowingArray(chunk_size, fade_size)
+        if num_overlap == 1:
+            # 无重叠时中块窗口端点为 0 且没有相邻块补位，会在块边界留下零样本；
+            # 而 num_overlap=1 时窗口在 result/counter 里本来完全抵消，直接用全 1 窗口
+            windowing_array = torch.ones(chunk_size, dtype=torch.float32)
         # Add padding for generic mode to handle edge artifacts
         if length_init > 2 * border and border > 0:
             mix = nn.functional.pad(mix, (border, border), mode="reflect")
 
     batch_size = config.inference.batch_size
 
-    # AMP only on CUDA; CPU (and use_amp=False) stays in fp32, same as before.
-    # Autocast wraps only the forward. Accumulators stay fp32 — an in-place
-    # add of an autocast fp16 tensor into an fp32 buffer raises on CUDA.
+    # AMP 只在 CUDA 上开；CPU（或 use_amp=False）保持 fp32。
+    # autocast 只包住前向，累加器保持 fp32（避免隐式半精度转换）。
     use_amp = dev.type == "cuda" and getattr(config.training, 'use_amp', True)
+    # 累加器放哪：显存不够就回落 CPU（result/counter 是 O(音频时长)）
+    accum_dev = _get_accumulation_device(dev, num_instruments, mix)
+    if mode == "generic":
+        windowing_array = windowing_array.to(accum_dev)
 
     with torch.inference_mode():
-            # Keep accumulators on the compute device — avoid a sync per chunk.
-            req_shape = (num_instruments,) + mix.shape
-            result = torch.zeros(req_shape, dtype=torch.float32, device=dev)
-            counter = torch.zeros(req_shape, dtype=torch.float32, device=dev)
+        # 累加在计算设备上完成，避免每块一次同步；显存吃紧时 accum_dev
+        # 为 CPU，每块多一次拷贝但不会 OOM。
+        req_shape = (num_instruments,) + mix.shape
+        result = torch.zeros(req_shape, dtype=torch.float32, device=accum_dev)
+        # counter 与 instrument/channel 无关，1 维即可（省 K*C 倍内存）
+        counter = torch.zeros(mix.shape[-1], dtype=torch.float32, device=accum_dev)
 
-            i = 0
-            batch_data = []
-            batch_locations = []
-            if pbar and should_print:
-                progress_bar = tqdm(
-                    total=mix.shape[1], desc="Processing audio chunks", leave=False
-                )
+        i = 0
+        batch_data = []
+        batch_locations = []
+        if pbar and should_print:
+            progress_bar = tqdm(
+                total=mix.shape[1], desc="Processing audio chunks", leave=False
+            )
+        else:
+            progress_bar = None
+
+        while i < mix.shape[1]:
+            # Extract chunk and apply padding if necessary
+            part = mix[:, i:i + chunk_size].to(dev)
+            chunk_len = part.shape[-1]
+            if mode == "generic" and chunk_len > chunk_size // 2:
+                pad_mode = "reflect"
             else:
-                progress_bar = None
+                pad_mode = "constant"
+            part = nn.functional.pad(part, (0, chunk_size - chunk_len), mode=pad_mode, value=0)
 
-            while i < mix.shape[1]:
-                # Extract chunk and apply padding if necessary
-                part = mix[:, i:i + chunk_size].to(dev)
-                chunk_len = part.shape[-1]
-                if mode == "generic" and chunk_len > chunk_size // 2:
-                    pad_mode = "reflect"
-                else:
-                    pad_mode = "constant"
-                part = nn.functional.pad(part, (0, chunk_size - chunk_len), mode=pad_mode, value=0)
+            batch_data.append(part)
+            batch_locations.append((i, chunk_len))
+            i += step
 
-                batch_data.append(part)
-                batch_locations.append((i, chunk_len))
-                i += step
+            # Process batch if it's full or the end is reached
+            if len(batch_data) >= batch_size or i >= mix.shape[1]:
+                # Tail batch shorter than batch_size: pad with zeros so the
+                # model always sees batch_size. Samples are independent in eval
+                # mode, so zero rows do not change real outputs. batch_locations
+                # stays real-only and only those rows are accumulated.
+                n_real = len(batch_data)
+                if n_real < batch_size:
+                    batch_data.extend(
+                        torch.zeros_like(batch_data[0]) for _ in range(batch_size - n_real)
+                    )
+                arr = torch.stack(batch_data, dim=0)
+                with torch.amp.autocast(device_type=dev.type, enabled=use_amp):
+                    x = model(arr)
+                x = x.float()
 
-                # Process batch if it's full or the end is reached
-                if len(batch_data) >= batch_size or i >= mix.shape[1]:
-                    # Tail batch shorter than batch_size: pad with zeros so the
-                    # model always sees batch_size. Samples are independent, so
-                    # zero rows do not change real outputs. batch_locations
-                    # stays real-only and only those rows are accumulated.
-                    n_real = len(batch_data)
-                    if n_real < batch_size:
-                        batch_data.extend(
-                            torch.zeros_like(batch_data[0]) for _ in range(batch_size - n_real)
-                        )
-                    arr = torch.stack(batch_data, dim=0)
-                    with torch.amp.autocast(device_type=dev.type, enabled=use_amp):
-                        x = model(arr)
-                    x = x.float()
-
-                    for j, (start, seg_len) in enumerate(batch_locations):
-                        if mode == "generic":
-                            # One window per chunk. A shared batch window makes
-                            # `i - step == 0` false whenever batch_size > 1.
-                            is_first = start == 0
-                            is_last = start + step >= mix.shape[-1]
-                            if not is_first and not is_last:
-                                window = windowing_array
-                            else:
-                                window = windowing_array.clone()
-                                if is_first:
-                                    window[:fade_size] = 1
-                                if is_last:
-                                    window[-fade_size:] = 1
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len] * window[..., :seg_len]
-                            counter[..., start:start + seg_len] += window[..., :seg_len]
+                for j, (start, seg_len) in enumerate(batch_locations):
+                    if mode == "generic":
+                        # One window per chunk. A shared batch window makes
+                        # `i - step == 0` false whenever batch_size > 1.
+                        is_first = start == 0
+                        is_last = start + step >= mix.shape[-1]
+                        if not is_first and not is_last:
+                            window = windowing_array
                         else:
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len]
-                            counter[..., start:start + seg_len] += 1.0
+                            window = windowing_array.clone()
+                            if is_first:
+                                window[:fade_size] = 1
+                            if is_last:
+                                window[-fade_size:] = 1
+                        seg = x[j, ..., :seg_len].to(accum_dev) * window[..., :seg_len]
+                        result[..., start:start + seg_len] += seg
+                        counter[start:start + seg_len] += window[..., :seg_len]
+                    else:
+                        result[..., start:start + seg_len] += x[j, ..., :seg_len].to(accum_dev)
+                        counter[start:start + seg_len] += 1.0
 
-                    batch_data.clear()
-                    batch_locations.clear()
-
-                if progress_bar:
-                    progress_bar.update(step)
-
-                if progress_cb is not None:
-                    progress_cb(min(i, mix.shape[1]), mix.shape[1])
+                batch_data.clear()
+                batch_locations.clear()
 
             if progress_bar:
-                progress_bar.close()
+                progress_bar.update(step)
 
-            # One device→host copy after every chunk has been accumulated.
-            estimated_sources = (result / counter).cpu().numpy()
-            np.nan_to_num(estimated_sources, copy=False, nan=0.0)
+            if progress_cb is not None:
+                progress_cb(min(i, mix.shape[1]), mix.shape[1])
 
-            # Remove padding for generic mode
-            if mode == "generic":
-                if length_init > 2 * border and border > 0:
-                    estimated_sources = estimated_sources[..., border:-border]
+        if progress_bar:
+            progress_bar.close()
+
+        # One device→host copy after every chunk has been accumulated.
+        result.div_(counter)
+        estimated_sources = result.cpu().numpy()
+        np.nan_to_num(estimated_sources, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Remove padding for generic mode
+        if mode == "generic":
+            if length_init > 2 * border and border > 0:
+                estimated_sources = estimated_sources[..., border:-border]
 
     # Return the result as a dictionary or a single array
     if mode == "demucs":
