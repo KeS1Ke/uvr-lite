@@ -57,6 +57,12 @@ def config_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "configs" / info["config"]
 
 
+def model_file(name: str) -> Path:
+    """本地权重路径。文件名以注册表 filename 为准（.safetensors 或 .ckpt）。"""
+    info = get_model_info(name)
+    return models_dir() / info.get("filename", f"{name}.ckpt")
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -298,7 +304,7 @@ def ensure_model(name: str, force: bool = False,
     权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
     """
     info = get_model_info(name)
-    ckpt = models_dir() / info.get("filename", f"{name}.ckpt")
+    ckpt = model_file(name)
 
     if ckpt.exists() and not force:
         if _check_verified(ckpt):
