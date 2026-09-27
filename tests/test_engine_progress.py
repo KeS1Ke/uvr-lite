@@ -47,7 +47,7 @@ def fake_ensure_model(model_name):
     return Path("fake.ckpt")
 
 
-def fake_load_model(model_name, ckpt_path, device):
+def fake_load_model(model_name, ckpt_path, device, batch_size=None, num_overlap=None):
     return object(), make_config()
 
 
@@ -176,9 +176,9 @@ def test_separator_reuses_model_across_files(tmp_path, monkeypatch):
     loads = []
     real_load = engine_mod.load_model  # fixture 已换成 fake，包装计数即可
 
-    def counting_load_model(model_name, ckpt_path, device):
+    def counting_load_model(model_name, ckpt_path, device, **kwargs):
         loads.append(model_name)
-        return real_load(model_name, ckpt_path, device)
+        return real_load(model_name, ckpt_path, device, **kwargs)
 
     monkeypatch.setattr(engine_mod, "load_model", counting_load_model)
     from uvr_lite.engine import Separator

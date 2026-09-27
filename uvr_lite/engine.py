@@ -5,11 +5,13 @@
 -> instrumental = mix - vocals（数学无损）-> 写 FLAC/WAV。
 
 会话复用：Separator 类把「模型加载」与「单文件分离」解耦——CLI 多文件与 GUI 批处理
-共用一个 Separator，模型只加载一次（640MB ckpt + 图构建约 20s，逐文件重载是最大浪费）。
+共用一个 Separator，模型只加载一次（320MB 权重 + 图构建约 20s，逐文件重载是最大浪费）。
 separate_file() 保留为薄封装（每次调用新建会话），兼容旧 API 与测试。
 """
 
 import argparse
+import importlib.util
+import logging
 import os
 import pickle
 import sys
@@ -21,6 +23,8 @@ import numpy as np
 import soundfile as sf
 import soxr
 import torch
+
+_log = logging.getLogger(__name__)
 
 # msst/ 采用 `from models.xxx import ...` / `from utils.xxx import ...` 绝对导入，
 # 因此必须把 msst 目录加入 sys.path（与上游 inference.py 的做法一致）。
@@ -55,8 +59,13 @@ def pick_device(device: str) -> str:
     return device
 
 
-def load_model(model_name: str, ckpt_path: Path, device: str):
-    """加载模型与配置（加载流程对齐 MSST 上游的 inference 惯例）。"""
+def load_model(model_name: str, ckpt_path: Path, device: str,
+               batch_size: int | None = None, num_overlap: int | None = None):
+    """加载模型与配置（加载流程对齐 MSST 上游的 inference 惯例）。
+
+    batch_size / num_overlap 在预热前写入 config：否则用户传 --batch-size 1
+    防 OOM 时，预热仍按模型 yaml 的大 batch 跑（显存/耗时都会超标）。
+    """
     info = get_model_info(model_name)
     torch.backends.cudnn.benchmark = True
     # TF32 / 高精度 matmul 只在 CUDA 上设（Ampere+ 同音质更快，4060 等适用）
@@ -93,22 +102,31 @@ def load_model(model_name: str, ckpt_path: Path, device: str):
     # CPU 上 AMP 无意义，且避免 autocast 兼容问题
     if device.startswith("cpu"):
         config.training["use_amp"] = False
+    # 会话级参数覆盖须在预热/编译前生效（低显存 --batch-size 1 也作用于预热）
+    if batch_size is not None and batch_size >= 1:
+        config.inference["batch_size"] = batch_size
+    if num_overlap is not None and num_overlap >= 1:
+        config.inference["num_overlap"] = num_overlap
     model = _compile_and_warmup(model, config, device)
     return model, config
 
 
 def _cfg_get(section, name, default=None):
-    """从 ConfigDict / SimpleNamespace 读字段；节或字段不存在时返回 default。"""
+    """从 ConfigDict / SimpleNamespace / dict 读字段；节或字段不存在时返回 default。"""
     if section is None:
         return default
+    if isinstance(section, dict):
+        return section.get(name, default)
     return getattr(section, name, default)
 
 
-def _warmup(model, config, device: str) -> bool:
-    """用真实推理形状预热一次，消除首块 CUDA/cuDNN 内核选择抖动。
+def _warmup(model, config, device: str, full_shape: bool = False) -> bool:
+    """预热一次，消除首块 CUDA/cuDNN 内核选择抖动。失败吞异常并返回 False。
 
+    full_shape=False（默认）：batch 1 × chunk/10 的短前向——加载开销与旧版持平；
+    full_shape=True：真实推理形状（batch × chunk），仅 CUDA 编译预热时使用。
     chunk：inference.chunk_size，否则 audio.chunk_size，否则 352800。
-    batch：inference.batch_size（至少 1）。失败吞掉异常并返回 False。
+    batch：inference.batch_size（至少 1）。
     """
     try:
         audio = getattr(config, "audio", None)
@@ -120,11 +138,16 @@ def _warmup(model, config, device: str) -> bool:
             chunk = _cfg_get(audio, "chunk_size")
         if chunk is None:
             chunk = 352800
+        chunk = int(chunk)
         batch = _cfg_get(inference, "batch_size", 1)
         batch = 1 if batch is None else int(batch)
         if batch < 1:
             batch = 1
-        dummy = torch.zeros(batch, n_ch, int(chunk))
+        if not full_shape:
+            # 短前向足够触发 cuDNN 内核选择，代价与旧版一致（CPU 上也毫秒级）
+            batch = 1
+            chunk = max(chunk // 10, 2048)
+        dummy = torch.zeros(batch, n_ch, chunk)
         with torch.inference_mode():
             model(dummy.to(device))
     except Exception:
@@ -132,26 +155,42 @@ def _warmup(model, config, device: str) -> bool:
     return True
 
 
-def _compile_and_warmup(model, config, device: str):
-    """CUDA 且 UVR_COMPILE 不是 "0" 时 torch.compile。
+def _triton_available() -> bool:
+    """torch.compile 的 inductor 后端依赖 triton；Windows 官方 wheel 不带。"""
+    try:
+        return importlib.util.find_spec("triton") is not None
+    except (ImportError, ValueError):
+        return False
 
-    编译失败，或编译后预热返回 False，则退回 eager 再预热一次。
-    CPU / UVR_COMPILE=0 不编译，返回的模型类型不变。
+
+def _compile_and_warmup(model, config, device: str):
+    """CUDA 且装了 triton 且 UVR_COMPILE 不是 "0" 时 torch.compile。
+
+    Windows 官方 torch 不含 triton，编译必然失败：直接跳过，避免每次加载
+    白等十几秒（失败信息写日志，不打断使用）。编译失败或编译后预热失败，
+    退回 eager 再预热一次。CPU / UVR_COMPILE=0 / 无 triton 不编译。
     """
     if not device.startswith("cuda") or os.environ.get("UVR_COMPILE") == "0":
+        _warmup(model, config, device)
+        return model
+
+    if not _triton_available():
+        _log.info("未检测到 triton，跳过 torch.compile（可用 UVR_COMPILE=0 显式关闭）")
         _warmup(model, config, device)
         return model
 
     eager = model
     try:
         compiled = torch.compile(eager, mode="reduce-overhead")
-    except Exception:
+    except Exception as e:
+        _log.info("torch.compile 失败，退回 eager：%s", e)
         _warmup(eager, config, device)
         return eager
 
-    if _warmup(compiled, config, device):
+    if _warmup(compiled, config, device, full_shape=True):
         return compiled
 
+    _log.info("编译模型预热失败，退回 eager")
     _warmup(eager, config, device)
     return eager
 
@@ -191,7 +230,7 @@ class Separator:
     """引擎会话：模型只加载一次，可连续分离多个文件。
 
     CLI 多文件与 GUI 批处理都通过它复用模型，避免每文件重复加载
-    （640MB ckpt 读取 + 图构建约 20s/次）。
+    （320MB 权重读取 + 图构建约 20s/次）。
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "auto",
@@ -202,14 +241,12 @@ class Separator:
         self.verbose = verbose
 
         ckpt = ensure_model(model_name)
-        self.model, self.config = load_model(model_name, ckpt, self.device)
-
-        # 低显存 GPU 可调小批大小防 OOM（默认取模型配置 yaml）
-        if batch_size is not None and batch_size >= 1:
-            self.config.inference["batch_size"] = batch_size
-        # 质量/速度开关：num_overlap 越小越快（1 = 无重叠，约 2x 提速；默认取 yaml）
-        if num_overlap is not None and num_overlap >= 1:
-            self.config.inference["num_overlap"] = num_overlap
+        # 低显存 GPU 可调小批大小防 OOM；num_overlap 越小越快（1 = 无重叠，约 2x）。
+        # 两者都在 load_model 内、预热前写入 config（默认取模型配置 yaml）。
+        self.model, self.config = load_model(
+            model_name, ckpt, self.device,
+            batch_size=batch_size, num_overlap=num_overlap,
+        )
 
         self.sample_rate: int = getattr(self.config.audio, "sample_rate", 44100)
 
@@ -326,7 +363,7 @@ def separate_file(
 ) -> list[Path]:
     """兼容薄封装：每次调用新建会话（模型加载一次）。
 
-    批量场景请直接创建 Separator 复用，避免每文件重载 640MB 模型。
+    批量场景请直接创建 Separator 复用，避免每文件重载 320MB 模型。
     """
     sep = Separator(model_name=model_name, device=device, batch_size=batch_size,
                     num_overlap=num_overlap, verbose=verbose)

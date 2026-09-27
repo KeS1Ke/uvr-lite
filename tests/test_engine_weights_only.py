@@ -5,7 +5,6 @@ fp16-lite 分发格式为纯张量（{"state_dict": {name: Tensor}}），无 pic
 torch.load(weights_only=True) 抛 UnpicklingError，engine 应转为可读错误。
 """
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy
@@ -13,15 +12,18 @@ import pytest
 import torch
 
 import uvr_lite.engine as engine
-
-_CKPT = Path("models") / "bs_roformer_ep317.ckpt"
+from uvr_lite.download import model_file
+from uvr_lite.models import DEFAULT_MODEL
 
 
 def test_default_model_ckpt_is_weights_only_safe():
-    """注册表默认模型权重必须是纯张量格式（weights_only=True 可加载）。"""
-    if not _CKPT.exists():
+    """注册表默认模型若为 .ckpt，必须能被 weights_only=True 安全加载。"""
+    path = model_file(DEFAULT_MODEL)
+    if not path.exists():
         pytest.skip("本地无默认模型权重（CI / 无模型环境跳过）")
-    obj = torch.load(_CKPT, map_location="cpu", weights_only=True)
+    if path.suffix != ".ckpt":
+        pytest.skip("默认模型已是 safetensors，无 pickle 载入面")
+    obj = torch.load(path, map_location="cpu", weights_only=True)
     assert isinstance(obj, dict) and "state_dict" in obj
 
 
