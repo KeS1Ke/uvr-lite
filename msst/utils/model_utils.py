@@ -112,6 +112,7 @@ def demix(
     should_print = not dist.is_initialized() or dist.get_rank() == 0
 
     mix = torch.tensor(mix, dtype=torch.float32)
+    dev = torch.device(device) if not isinstance(device, torch.device) else device
 
     if model_type == 'htdemucs':
         mode = 'demucs'
@@ -135,21 +136,23 @@ def demix(
         step = chunk_size // num_overlap
         border = chunk_size - step
         length_init = mix.shape[-1]
-        windowing_array = _getWindowingArray(chunk_size, fade_size)
+        windowing_array = _getWindowingArray(chunk_size, fade_size).to(dev)
         # Add padding for generic mode to handle edge artifacts
         if length_init > 2 * border and border > 0:
             mix = nn.functional.pad(mix, (border, border), mode="reflect")
 
     batch_size = config.inference.batch_size
 
-    use_amp = getattr(config.training, 'use_amp', True)
+    # AMP only on CUDA; CPU (and use_amp=False) stays in fp32, same as before.
+    # Autocast wraps only the forward. Accumulators stay fp32 — an in-place
+    # add of an autocast fp16 tensor into an fp32 buffer raises on CUDA.
+    use_amp = dev.type == "cuda" and getattr(config.training, 'use_amp', True)
 
-    with torch.cuda.amp.autocast(enabled=use_amp):
-        with torch.inference_mode():
-            # Initialize result and counter tensors
+    with torch.inference_mode():
+            # Keep accumulators on the compute device — avoid a sync per chunk.
             req_shape = (num_instruments,) + mix.shape
-            result = torch.zeros(req_shape, dtype=torch.float32)
-            counter = torch.zeros(req_shape, dtype=torch.float32)
+            result = torch.zeros(req_shape, dtype=torch.float32, device=dev)
+            counter = torch.zeros(req_shape, dtype=torch.float32, device=dev)
 
             i = 0
             batch_data = []
@@ -163,7 +166,7 @@ def demix(
 
             while i < mix.shape[1]:
                 # Extract chunk and apply padding if necessary
-                part = mix[:, i:i + chunk_size].to(device)
+                part = mix[:, i:i + chunk_size].to(dev)
                 chunk_len = part.shape[-1]
                 if mode == "generic" and chunk_len > chunk_size // 2:
                     pad_mode = "reflect"
@@ -177,22 +180,38 @@ def demix(
 
                 # Process batch if it's full or the end is reached
                 if len(batch_data) >= batch_size or i >= mix.shape[1]:
+                    # Tail batch shorter than batch_size: pad with zeros so the
+                    # model always sees batch_size. Samples are independent, so
+                    # zero rows do not change real outputs. batch_locations
+                    # stays real-only and only those rows are accumulated.
+                    n_real = len(batch_data)
+                    if n_real < batch_size:
+                        batch_data.extend(
+                            torch.zeros_like(batch_data[0]) for _ in range(batch_size - n_real)
+                        )
                     arr = torch.stack(batch_data, dim=0)
-                    x = model(arr)
-
-                    if mode == "generic":
-                        window = windowing_array.clone() # using clone() fixes the clicks at chunk edges when using batch_size=1
-                        if i - step == 0:  # First audio chunk, no fadein
-                            window[:fade_size] = 1
-                        elif i >= mix.shape[1]:  # Last audio chunk, no fadeout
-                            window[-fade_size:] = 1
+                    with torch.amp.autocast(device_type=dev.type, enabled=use_amp):
+                        x = model(arr)
+                    x = x.float()
 
                     for j, (start, seg_len) in enumerate(batch_locations):
                         if mode == "generic":
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len].cpu() * window[..., :seg_len]
+                            # One window per chunk. A shared batch window makes
+                            # `i - step == 0` false whenever batch_size > 1.
+                            is_first = start == 0
+                            is_last = start + step >= mix.shape[-1]
+                            if not is_first and not is_last:
+                                window = windowing_array
+                            else:
+                                window = windowing_array.clone()
+                                if is_first:
+                                    window[:fade_size] = 1
+                                if is_last:
+                                    window[-fade_size:] = 1
+                            result[..., start:start + seg_len] += x[j, ..., :seg_len] * window[..., :seg_len]
                             counter[..., start:start + seg_len] += window[..., :seg_len]
                         else:
-                            result[..., start:start + seg_len] += x[j, ..., :seg_len].cpu()
+                            result[..., start:start + seg_len] += x[j, ..., :seg_len]
                             counter[..., start:start + seg_len] += 1.0
 
                     batch_data.clear()
@@ -207,9 +226,8 @@ def demix(
             if progress_bar:
                 progress_bar.close()
 
-            # Compute final estimated sources
-            estimated_sources = result / counter
-            estimated_sources = estimated_sources.cpu().numpy()
+            # One device→host copy after every chunk has been accumulated.
+            estimated_sources = (result / counter).cpu().numpy()
             np.nan_to_num(estimated_sources, copy=False, nan=0.0)
 
             # Remove padding for generic mode
