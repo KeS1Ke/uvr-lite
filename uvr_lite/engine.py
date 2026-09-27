@@ -10,6 +10,7 @@ separate_file() 保留为薄封装（每次调用新建会话），兼容旧 API
 """
 
 import argparse
+import os
 import pickle
 import sys
 from collections.abc import Callable
@@ -58,6 +59,11 @@ def load_model(model_name: str, ckpt_path: Path, device: str):
     """加载模型与配置（加载流程对齐 MSST 上游的 inference 惯例）。"""
     info = get_model_info(model_name)
     torch.backends.cudnn.benchmark = True
+    # TF32 / 高精度 matmul 只在 CUDA 上设（Ampere+ 同音质更快，4060 等适用）
+    if device.startswith("cuda"):
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     model, config = get_model_from_config(info["model_type"], str(config_path(model_name)))
     # .safetensors 无 pickle 载入面，加载更快；.ckpt 用 weights_only=True
@@ -87,20 +93,67 @@ def load_model(model_name: str, ckpt_path: Path, device: str):
     # CPU 上 AMP 无意义，且避免 autocast 兼容问题
     if device.startswith("cpu"):
         config.training["use_amp"] = False
-    _warmup(model, config, device)
+    model = _compile_and_warmup(model, config, device)
     return model, config
 
 
-def _warmup(model, config, device: str) -> None:
-    """预热：跑一次短前向，消除首块推理的 CUDA/cuDNN 内核选择抖动。失败静默。"""
+def _cfg_get(section, name, default=None):
+    """从 ConfigDict / SimpleNamespace 读字段；节或字段不存在时返回 default。"""
+    if section is None:
+        return default
+    return getattr(section, name, default)
+
+
+def _warmup(model, config, device: str) -> bool:
+    """用真实推理形状预热一次，消除首块 CUDA/cuDNN 内核选择抖动。
+
+    chunk：inference.chunk_size，否则 audio.chunk_size，否则 352800。
+    batch：inference.batch_size（至少 1）。失败吞掉异常并返回 False。
+    """
     try:
-        n_ch = int(getattr(config.audio, "num_channels", 2))
-        chunk = int(getattr(config.inference, "chunk_size", 352800)) // 10
-        dummy = torch.zeros(1, n_ch, max(chunk, 2048))
+        audio = getattr(config, "audio", None)
+        inference = getattr(config, "inference", None)
+        n_ch = _cfg_get(audio, "num_channels", 2)
+        n_ch = 2 if n_ch is None else int(n_ch)
+        chunk = _cfg_get(inference, "chunk_size")
+        if chunk is None:
+            chunk = _cfg_get(audio, "chunk_size")
+        if chunk is None:
+            chunk = 352800
+        batch = _cfg_get(inference, "batch_size", 1)
+        batch = 1 if batch is None else int(batch)
+        if batch < 1:
+            batch = 1
+        dummy = torch.zeros(batch, n_ch, int(chunk))
         with torch.inference_mode():
             model(dummy.to(device))
     except Exception:
-        pass
+        return False
+    return True
+
+
+def _compile_and_warmup(model, config, device: str):
+    """CUDA 且 UVR_COMPILE 不是 "0" 时 torch.compile。
+
+    编译失败，或编译后预热返回 False，则退回 eager 再预热一次。
+    CPU / UVR_COMPILE=0 不编译，返回的模型类型不变。
+    """
+    if not device.startswith("cuda") or os.environ.get("UVR_COMPILE") == "0":
+        _warmup(model, config, device)
+        return model
+
+    eager = model
+    try:
+        compiled = torch.compile(eager, mode="reduce-overhead")
+    except Exception:
+        _warmup(eager, config, device)
+        return eager
+
+    if _warmup(compiled, config, device):
+        return compiled
+
+    _warmup(eager, config, device)
+    return eager
 
 
 def _load_audio(path: Path, sr: int) -> np.ndarray:
