@@ -15,6 +15,7 @@ MODEL_REGISTRY: dict[str, dict] = {
         "model_type": "bs_roformer",
         "config": "model_bs_roformer_ep_317_sdr_12.9755.yaml",
         "filename": "bs_roformer_ep317.lite.safetensors",
+        "size_mb": 320,
         "ckpt_url": (
             "https://github.com/KeS1Ke/uvr-lite/releases/download/"
             "models/bs_roformer_ep317.lite.safetensors"
@@ -30,6 +31,7 @@ MODEL_REGISTRY: dict[str, dict] = {
         "model_type": "mel_band_roformer",
         "config": "mel_band_roformer_karaoke_aufr33_viperx_config.yaml",
         "filename": "mel_band_roformer_karaoke_aufr33_viperx.lite.safetensors",
+        "size_mb": 456,
         "ckpt_url": (
             "https://github.com/KeS1Ke/uvr-lite/releases/download/"
             "models/mel_band_roformer_karaoke_aufr33_viperx.lite.safetensors"
