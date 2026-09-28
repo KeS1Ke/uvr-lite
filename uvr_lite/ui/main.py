@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..download import cuda_torch_installed, model_file, repo_root
-from ..log import get_logger, log_exception, log_hint
+from ..log import ensure_log_dir, get_logger, log_exception, log_hint, log_path
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
@@ -50,6 +50,18 @@ _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
 def _log():
     """惰性取 logger：模块导入时不建 logs/ 目录（导入 UI 不应有文件副作用）。"""
     return get_logger("uvr_lite.ui")
+
+
+def _log_file_text() -> str:
+    """日志文件绝对路径（给 tooltip/无障碍用）；定位失败时返回空串。
+
+    同 log.log_hint：异常目录布局下 repo_root 会抛 RuntimeError，拿路径
+    做展示的地方都得自己兜住，不能被"看看日志在哪"这种辅助信息拖崩。
+    """
+    try:
+        return str(log_path())
+    except Exception:
+        return ""
 
 PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
 
@@ -65,6 +77,17 @@ FORMAT_CHOICES = ["auto", "flac", "wav"]
 _PREFIX_PENDING = "⏳ "
 _PREFIX_OK = "✓ "
 _PREFIX_BAD = "✗ "
+
+# 单行标签留给错误文案的字符数：这一行的宽度要给同一行的按钮腾地方，超出即截断，
+# 完整原因在日志里（下载失败常见超长文案：urlopen error [WinError ...]）。
+# 取 16 使最坏情况（纯中文、每行都占满字宽）下 banner/engine 两行仍放得下。
+_ONE_LINE_ERR = 16
+
+
+def _short_error(error: str) -> str:
+    """压成单行放得下的错误摘要；空值兜一句「未知原因」，太长就截断。"""
+    text = (error or "未知原因").strip()
+    return text if len(text) <= _ONE_LINE_ERR else text[:_ONE_LINE_ERR] + "…"
 
 
 class ToggleSelectList(QListWidget):
@@ -219,7 +242,22 @@ class MainWindow(QMainWindow):
         root.addWidget(self.progress)
 
         self.label_status = QLabel("就绪。添加音频文件后即可开始。", central)
-        root.addWidget(self.label_status)
+        # 「查看日志」：模型下载/CUDA 安装失败只有一行标签写得下，完整原因在日志里，
+        # 这里给个固定入口（放在底部状态行，任何失败场景都够得着）
+        self.btn_open_log = QPushButton("查看日志", central)
+        # 绝对路径不进单行标签（会把「推理引擎」那行撑坏），只放 tooltip：
+        # 悬停即可知道日志文件在哪，看不见的屏幕阅读器也有无障碍描述
+        tip = "打开日志所在的文件夹，把里面的 uvr-lite.log 发给支持的人就能定位问题。"
+        if log_file := _log_file_text():
+            tip += f"\n日志文件：{log_file}"
+        self.btn_open_log.setToolTip(tip)
+        self.btn_open_log.setAccessibleDescription(tip)
+        self.btn_open_log.clicked.connect(self._open_log_dir)
+
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.label_status, 1)  # 状态文案优先占宽度，按钮靠右不挤
+        status_row.addWidget(self.btn_open_log)
+        root.addLayout(status_row)
 
         self.setCentralWidget(central)
 
@@ -413,8 +451,11 @@ class MainWindow(QMainWindow):
             self.label_status.setText("模型下载完成，可以开始分离了。")
         else:
             self.banner.setVisible(True)
-            self.label_banner.setText(f"模型下载未完成：{error}（点击重试）")
-            # 提示条只有一行、放不下详情：完整原因留给日志（弹窗/报障时查）
+            self.label_banner.setText(
+                f"模型下载未完成：{_short_error(error)}（失败原因见日志，点击重试）")
+            # 提示条只有一行、放不下详情（也不该把绝对路径塞进去撑坏这一行）：
+            # 完整原因留给日志，用户从底部「查看日志」进入文件夹
+            self.label_banner.setToolTip("点窗口底部「查看日志」可以看到完整失败原因。")
             _log().warning("模型下载失败: %s", error)
 
     # ---------- CUDA 引擎下载 ----------
@@ -475,7 +516,10 @@ class MainWindow(QMainWindow):
                 self, "CUDA 引擎已安装",
                 "CUDA 引擎安装完成。重启 uvr-lite 后，设备选择「自动」将优先使用 GPU 加速。")
         else:
-            self.label_engine.setText(f"CUDA 引擎下载未完成：{error}（点击重试）")
+            self.label_engine.setText(
+                f"CUDA 引擎下载未完成：{_short_error(error)}（失败原因见日志，点击重试）")
+            # 这一行塞不下详情也塞不下路径：完整原因在日志里
+            self.label_engine.setToolTip("点窗口底部「查看日志」可以看到完整失败原因。")
             # 3.3GB 下载失败的原因（源不可用/磁盘满/解压被拦）只有日志里有
             _log().warning("CUDA 引擎下载失败: %s", error)
 
@@ -620,6 +664,29 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(busy)
         self.progress.setEnabled(busy)
         self.list_files.setEnabled(not busy)
+
+    # ---------- 查看日志 ----------
+
+    def _open_log_dir(self) -> None:
+        """打开日志所在文件夹（失败排错的统一入口）。
+
+        打开文件夹而不是 .log 文件：日志在用户机器上未必有关联程序，打开
+        文件夹一定可用，用户也能顺手把文件发出去。目录不可用（只读安装目录
+        等）时不抛异常——"想看日志"不能反过来再崩一次。
+        """
+        try:
+            target = ensure_log_dir()  # 日志文件还没生成时，先把它所在的目录建出来
+            opened = target is not None and QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(target)))
+        except Exception as e:  # repo_root 抛错/打开失败都降级成一句提示
+            opened = False
+            log_exception("打开日志文件夹失败", e)
+        if opened:
+            return
+        QMessageBox.information(
+            self, "打不开日志文件夹",
+            "暂时打不开日志所在的文件夹（可能是安装目录不能写入）。"
+            "如果问题一直出现，把这段提示截图发给支持的人就行。")
 
     # ---------- 生命周期 ----------
 
