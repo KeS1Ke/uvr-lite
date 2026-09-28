@@ -109,13 +109,39 @@ def test_install_cancel_during_extract(fake_wheel, tmp_path):
     with pytest.raises(InterruptedError):
         install_cuda_torch(tmp_path / "base", progress_callback=cb)
     assert (fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL).exists()
-    # 半成品目录不完整（未全量解压）
-    assert not (
-        tmp_path / "base" / "torch_cuda" / "torch-2.7.1+cu128.dist-info" / "METADATA"
-    ).exists()
+    # 取消后被清理干净：残缺的 torch/__init__.py 不能让 installed 判真
+    assert not cuda_torch_installed(tmp_path / "base")
     # 取消后重新安装：不再下载（wheel 已就绪），直接解压完成
     install_cuda_torch(tmp_path / "base")
     assert cuda_torch_installed(tmp_path / "base")
+
+
+def test_install_cancel_clears_half_extracted_dest(fake_wheel, tmp_path, monkeypatch):
+    """解压中途取消必须删掉半成品目录（回归：marker 先落盘被误判已安装）。
+
+    torch/__init__.py 是安装的判定依据却几乎最先解压；只要它留下，
+    cuda_torch_installed() 就返回 True，后续调用直接跳过安装。
+    """
+    import zipfile
+
+    extracted = {"n": 0}
+
+    class _AbortingZipFile(zipfile.ZipFile):
+        def extract(self, member, path=None, pwd=None):
+            extracted["n"] += 1
+            if extracted["n"] > 1:      # 让 torch/__init__.py 先落盘
+                raise InterruptedError("解压已取消")
+            return super().extract(member, path, pwd)
+
+    monkeypatch.setattr(zipfile, "ZipFile", _AbortingZipFile)
+    with pytest.raises(InterruptedError):
+        install_cuda_torch(tmp_path / "base")
+    assert extracted["n"] > 1, "应至少解压出一个成员（含 torch/__init__.py）"
+    dest = tmp_path / "base" / "torch_cuda"
+    assert not dest.exists(), "取消后半成品目录必须清理干净"
+    assert not cuda_torch_installed(tmp_path / "base")
+    # wheel 缓存保留：docstring 承诺下次直接从解压开始
+    assert (fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL).exists()
 
 
 def test_cuda_torch_installed_detects_marker(fake_wheel, tmp_path):

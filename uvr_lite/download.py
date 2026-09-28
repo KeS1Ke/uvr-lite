@@ -57,6 +57,16 @@ def config_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "configs" / info["config"]
 
 
+def model_file(name: str) -> Path:
+    """本地权重路径，以注册表 filename 为准（safetensors 或 .ckpt）。
+
+    注册表的 filename 是本地文件名的唯一权威来源；调用方不得自行拼接
+    `{name}.ckpt`，否则已存在的 safetensors 权重会被判成未下载而重复下载。
+    """
+    info = get_model_info(name)
+    return models_dir() / info.get("filename", f"{name}.ckpt")
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -187,8 +197,11 @@ def _download_segment(url: str, part: Path, start: int, end: int,
             if e.code == 416 and done > 0:
                 return
             raise
+        # 服务器忽略 Range 时返回 200 全量：此时必须 "wb" 截断重写段文件，
+        # 否则追加模式会把整段内容接在已下载字节之后 → 合并出的权重损坏。
+        resume = done > 0 and resp.status == 206
         try:
-            with open(part, "ab" if done else "wb") as f:
+            with open(part, "ab" if resume else "wb") as f:
                 while chunk := resp.read(1 << 20):
                     if cancel_check is not None and cancel_check():
                         raise InterruptedError("下载已取消")
@@ -298,7 +311,7 @@ def ensure_model(name: str, force: bool = False,
     权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
     """
     info = get_model_info(name)
-    ckpt = models_dir() / info.get("filename", f"{name}.ckpt")
+    ckpt = model_file(name)
 
     if ckpt.exists() and not force:
         if _check_verified(ckpt):
@@ -430,18 +443,25 @@ def install_cuda_torch(base: Path | None = None,
     import zipfile
 
     offset = download_total
-    with zipfile.ZipFile(wheel) as zf:
-        total = offset + sum(i.compress_size for i in zf.infolist())
-        done = last_report = offset
-        for info in zf.infolist():
-            zf.extract(info, dest)
-            done += info.compress_size
-            if progress_callback is not None and done - last_report >= _REPORT_INTERVAL:
-                last_report = done
-                if not progress_callback(done, total):
-                    raise InterruptedError("解压已取消")
-        if progress_callback is not None and last_report < total:
-            progress_callback(total, total)
+    try:
+        with zipfile.ZipFile(wheel) as zf:
+            total = offset + sum(i.compress_size for i in zf.infolist())
+            done = last_report = offset
+            for info in zf.infolist():
+                zf.extract(info, dest)
+                done += info.compress_size
+                if progress_callback is not None and done - last_report >= _REPORT_INTERVAL:
+                    last_report = done
+                    if not progress_callback(done, total):
+                        raise InterruptedError("解压已取消")
+            if progress_callback is not None and last_report < total:
+                progress_callback(total, total)
+    except InterruptedError:
+        # torch/__init__.py 通常最先解压出来，留下半成品会让
+        # cuda_torch_installed() 误判"已就绪"，下次调用直接跳过安装 →
+        # 拿到一个 import 即崩的坏 torch。wheel 缓存按承诺保留。
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     wheel.unlink(missing_ok=True)
 
     _prune_torch_install(dest)

@@ -150,6 +150,51 @@ def test_ensure_model_downloads_with_progress(fake_download_env):
     assert calls[-1] == (len(DATA), len(DATA))
 
 
+# ---------- model_file：本地权重路径的唯一入口 ----------
+
+def _entry(**overrides):
+    """测试用注册表条目（ckpt_url 不参与 model_file 断言，故用占位地址）。"""
+    entry = {
+        "model_type": "bs_roformer",
+        "config": "x.yaml",
+        "ckpt_url": "http://127.0.0.1:1/model.bin",
+        "mirror_urls": [],
+        "sha256": hashlib.sha256(DATA).hexdigest(),
+        "description": "测试模型",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_model_file_uses_registry_filename(monkeypatch, tmp_path):
+    """filename 是权威来源：不得被拼成 {name}.ckpt（safetensors 会误判未下载）。"""
+    monkeypatch.setattr("uvr_lite.models.MODEL_REGISTRY",
+                        {"test_model": _entry(filename="test_model.lite.safetensors")})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    assert dl.model_file("test_model") == tmp_path / "test_model.lite.safetensors"
+
+
+def test_model_file_falls_back_to_ckpt(monkeypatch, tmp_path):
+    """旧式条目未声明 filename 时回退 {name}.ckpt。"""
+    monkeypatch.setattr("uvr_lite.models.MODEL_REGISTRY", {"test_model": _entry()})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    assert dl.model_file("test_model") == tmp_path / "test_model.ckpt"
+
+
+def test_model_file_follows_model_dir_env(monkeypatch, tmp_path):
+    """安装场景 UVR_MODEL_DIR 改指向安装目录时，权重路径随之切换。"""
+    monkeypatch.setenv("UVR_MODEL_DIR", str(tmp_path / "custom"))
+    monkeypatch.setattr(dl, "repo_root", lambda: tmp_path / "repo")
+    # 真实注册表条目：safetensors 分发，文件名与模型名不同
+    assert dl.model_file("bs_roformer_ep317") == \
+        tmp_path / "custom" / "bs_roformer_ep317.lite.safetensors"
+
+
+def test_ensure_model_returns_model_file(fake_download_env):
+    """ensure_model 必须复用 model_file（路径拼接只此一处）。"""
+    assert dl.ensure_model("test_model") == dl.model_file("test_model")
+
+
 # ---------- 模块导入（tqdm 静默降级） ----------
 
 def test_download_imports_without_tqdm(monkeypatch):
@@ -302,6 +347,26 @@ def test_parallel_fallback_to_single_when_no_range(http_server, tmp_path):
     dest = tmp_path / "m.ckpt"
     dl._download([f"{http_server}/model.bin"], dest)
     assert dest.read_bytes() == DATA
+
+
+def test_segment_resume_appends_on_206(range_server, tmp_path):
+    """206 响应 → 段文件追加剩余字节（续传语义）。"""
+    part = tmp_path / "big.ckpt.part.s0"
+    half = len(DATA) // 2
+    part.write_bytes(DATA[:half])
+    dl._download_segment(f"{range_server}/big.bin", part, 0, len(DATA) - 1, 0)
+    assert part.read_bytes() == DATA
+
+
+def test_segment_truncates_when_server_ignores_range(http_server, tmp_path):
+    """服务器忽略 Range 返回 200 全量 → 段文件必须截断重写而非追加。
+
+    回归：曾无条件用 "ab"，旧半段后接上全量内容 → 合并出的权重损坏。
+    """
+    part = tmp_path / "big.ckpt.part.s0"
+    part.write_bytes(b"X" * 100)  # 模拟上次取消残留的半段
+    dl._download_segment(f"{http_server}/model.bin", part, 100, 100 + len(DATA) - 1, 0)
+    assert part.read_bytes() == DATA, "非 206 响应应以 wb 截断重写"
 
 
 # ---------- UVR_MODEL_DIR 环境变量（安装场景：模型目录指向安装目录） ----------
