@@ -1,7 +1,11 @@
 """uvr-lite 桌面界面主窗口（PySide6）。
 
-票 2：UI 骨架——文件列表（选择文件/选择文件夹/拖拽）、模型与参数表单、
-输出目录（QSettings 记忆）、♪ 窗口图标。推理接线在票 3，开始按钮暂禁用。
+本模块负责行窗口：文件列表与拖拽、参数表单（QSettings 记忆）、模型与
+推理引擎的下载状态呈现与触发，以及分离任务的接线（worker 线程 + 进度、
+取消、完成汇总）。
+
+torch/引擎不在本模块导入（惰性加载见 ui/worker.py）：界面启动与列表编辑
+不付数以秒计的 torch 导入成本。
 """
 
 import os
@@ -33,11 +37,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..download import cuda_torch_installed, models_dir, repo_root
+from ..download import cuda_torch_installed, model_file, repo_root
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
-from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationWorker
+from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationParams, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
 
@@ -331,10 +335,14 @@ class MainWindow(QMainWindow):
     def _on_device_changed(self) -> None:
         """设备选择 → 写 torch.ini（启动时据此加载 CPU/CUDA 版 torch）。
 
-        仅安装场景（{app}/torch_cpu|torch_cuda 存在）生效；开发场景忽略。
-        切换在下次启动时生效（torch 已在进程内加载）。
+        仅安装场景（{base}/torch_cpu|torch_cuda 存在）生效；开发场景（用环境
+        里已装的 torch）忽略。切换在下次启动时生效（torch 已在进程内加载）。
+
+        根目录必须走 repo_root()：安装布局是 {inst}/app/uvr_lite/ui/main.py，
+        按 __file__ 上推只会到 {inst}/app，而 torch_cpu/torch_cuda 在 {inst}
+        下（installer/install.iss [Files]），判断会恒为假 → 切换静默失效。
         """
-        base = Path(__file__).resolve().parents[2]
+        base = repo_root()
         if (base / "torch_cpu").exists() or (base / "torch_cuda").exists():
             try:
                 (base / "torch.ini").write_text(
@@ -347,11 +355,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_model_banner(self) -> None:
         model = self.combo_model.currentData()
-        ready = (models_dir() / f"{model}.ckpt").exists()
+        ready = model_file(model).exists()
         self.banner.setVisible(not ready)
         if not ready:
             label = MODEL_LABELS.get(model, model)
-            self.label_banner.setText(f"模型「{label}」未下载（约 640 MB），下载后即可开始分离。")
+            self.label_banner.setText(f"模型「{label}」未下载，下载后即可开始分离。")
 
     def _start_download(self) -> None:
         model = self.combo_model.currentData()
@@ -466,10 +474,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先添加音频文件（选择文件/文件夹或拖拽）。")
             return
         model = self.combo_model.currentData()
-        if not (models_dir() / f"{model}.ckpt").exists():
+        if not model_file(model).exists():
             QMessageBox.information(
                 self, "模型未下载",
-                "请先点击顶部「下载模型」按钮下载权重（约 640 MB），再开始分离。")
+                "请先点击顶部「下载模型」按钮下载该模型的权重，再开始分离。")
             self._refresh_model_banner()
             return
         out_dir = self.edit_out.text().strip() or str(Path.cwd() / "output")
@@ -495,16 +503,17 @@ class MainWindow(QMainWindow):
                                 "所选文件都无法识别为音频格式，请检查文件是否损坏。")
             return
 
-        params = {
-            "model_name": self.combo_model.currentData(),
-            "device": self.combo_device.currentText(),
-            "fmt": self.combo_format.currentText(),
-            "pcm": f"PCM_{self.combo_pcm.currentText()}",
-            "bigshifts": self.spin_bigshifts.value(),
-            "batch_size": self.spin_batch.value() or None,
-            "num_overlap": self.spin_overlap.value() or None,
-            "tta": self.check_tta.isChecked(),
-        }
+        params = SeparationParams(
+            model_name=model,
+            device=self.combo_device.currentText(),
+            fmt=self.combo_format.currentText(),
+            pcm=f"PCM_{self.combo_pcm.currentText()}",
+            bigshifts=self.spin_bigshifts.value(),
+            # 0 值（"默认（模型配置）"）→ None：让引擎回落模型自带配置
+            batch_size=self.spin_batch.value() or None,
+            num_overlap=self.spin_overlap.value() or None,
+            tta=self.check_tta.isChecked(),
+        )
         self._worker = SeparationWorker(list(ok_paths), out_dir, params)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -614,7 +623,7 @@ class MainWindow(QMainWindow):
 
 
 class QProgressBarWrap(QWidget):
-    """进度区（票 3 接线；骨架期仅占位）。"""
+    """整体进度条容器：对外暴露 .bar，由分离任务的进度信号驱动。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)

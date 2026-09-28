@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import __version__
-from .download import ensure_model, models_dir
+from .download import ensure_model, model_file
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
 
@@ -18,7 +18,7 @@ def _cmd_separate(args: argparse.Namespace) -> int:
         set_torch_mode(args.device)
     from .engine import Separator
 
-    # 会话复用：模型只加载一次，全部输入文件共用（避免每文件重载 640MB ckpt）
+    # 会话复用：模型只加载一次，全部输入文件共用（避免每文件重载权重）
     sep = Separator(model_name=args.model, device=args.device,
                     batch_size=args.batch_size, num_overlap=args.num_overlap)
     for inp in args.input:
@@ -66,8 +66,8 @@ def _cmd_models(args: argparse.Namespace) -> int:
     print(f"{'名称':<20} {'类型':<18} 状态")
     print("-" * 64)
     for name, info in MODEL_REGISTRY.items():
-        ckpt = models_dir() / f"{name}.ckpt"
-        status = f"{ckpt.stat().st_size / 1e6:.0f} MB" if ckpt.exists() else "未下载"
+        path = model_file(name)
+        status = f"{path.stat().st_size / 1e6:.0f} MB" if path.exists() else "未下载"
         print(f"{name:<20} {info['model_type']:<18} {status}")
         print(f"  {info['description']}")
     print(f"\n默认模型: {DEFAULT_MODEL}")

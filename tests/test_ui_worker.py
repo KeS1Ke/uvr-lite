@@ -6,7 +6,8 @@ import sys
 import pytest
 from PySide6.QtCore import QCoreApplication
 
-from uvr_lite.ui.worker import SeparationWorker
+from uvr_lite.models import DEFAULT_MODEL
+from uvr_lite.ui.worker import SeparationParams, SeparationWorker
 
 
 @pytest.fixture(scope="module")
@@ -28,7 +29,7 @@ def test_ui_import_does_not_load_torch():
         f"import uvr_lite.ui.main 不应加载 torch（实际已加载）: {r.stderr.decode()[-200:]}")
 
 
-def _run_two_files(monkeypatch, files, params):
+def _run_two_files(monkeypatch, files, params: SeparationParams):
     """mock Separator 按文件序号回调：文件 1 完整序列，文件 2 重复同序列。"""
     seq = [("decode", 0, 1), ("decode", 1, 1),
            ("chunk", 0, 100), ("chunk", 50, 100), ("chunk", 100, 100),
@@ -59,7 +60,7 @@ def test_file_two_chunk_starts_from_zero(tmp_path, monkeypatch, qapp):
     f2 = tmp_path / "b.wav"
     f1.write_bytes(b"x")
     f2.write_bytes(b"x")
-    progress = _run_two_files(monkeypatch, [f1, f2], {"bigshifts": 1})
+    progress = _run_two_files(monkeypatch, [f1, f2], SeparationParams(bigshifts=1))
 
     file2_chunks = [(ph, pct) for idx, ph, pct in progress if idx == 1 and ph == "chunk"]
     assert file2_chunks, "应收到文件 2 的 chunk 回调"
@@ -70,6 +71,58 @@ def test_progress_monotonic_within_file(tmp_path, monkeypatch, qapp):
     """单文件内进度不应回跳（chunk 升到 50 后 infer 不应打回）。"""
     f1 = tmp_path / "a.wav"
     f1.write_bytes(b"x")
-    progress = _run_two_files(monkeypatch, [f1], {"bigshifts": 1})
+    progress = _run_two_files(monkeypatch, [f1], SeparationParams(bigshifts=1))
     pcts = [pct for _, _, pct in progress]
     assert pcts == sorted(pcts), f"文件内进度应单调: {pcts}"
+
+
+def _capture_engine_calls(monkeypatch, tmp_path, params):
+    """跑一次 worker，记录 Separator 构造与 separate 收到的关键字参数。"""
+    captured = {}
+
+    class FakeSeparator:
+        def __init__(self, **kw):
+            captured["init"] = kw
+
+        def separate(self, path, out_dir, **kw):
+            captured["separate"] = kw
+            return [path]
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    SeparationWorker([f], "out", params).run()
+    return captured
+
+
+def test_params_forwarded_to_engine_unchanged(tmp_path, monkeypatch, qapp):
+    """params dict → dataclass 后，传给引擎的参数名与取值必须逐字不变。"""
+    captured = _capture_engine_calls(monkeypatch, tmp_path, SeparationParams(
+        model_name="mel_band_karaoke", device="cuda", fmt="flac", pcm="PCM_16",
+        bigshifts=3, batch_size=2, num_overlap=4, tta=True,
+    ))
+    assert captured["init"] == {
+        "model_name": "mel_band_karaoke",
+        "device": "cuda",
+        "batch_size": 2,
+        "num_overlap": 4,
+        "verbose": False,
+    }
+    sep_kw = dict(captured["separate"])
+    assert sep_kw.pop("progress_callback") is not None
+    assert sep_kw == {"pcm": "PCM_16", "fmt": "flac", "bigshifts": 3, "tta": True}
+
+
+def test_params_defaults_match_previous_dict(tmp_path, monkeypatch, qapp):
+    """默认值与原先 .get(key, default) 的默认值一致（含 batch/overlap 的 None）。"""
+    captured = _capture_engine_calls(monkeypatch, tmp_path, SeparationParams())
+    assert captured["init"] == {
+        "model_name": DEFAULT_MODEL,
+        "device": "auto",
+        "batch_size": None,   # None = 回落模型配置（UI 的 0 值已转 None）
+        "num_overlap": None,
+        "verbose": False,
+    }
+    sep_kw = dict(captured["separate"])
+    sep_kw.pop("progress_callback")
+    assert sep_kw == {"pcm": "PCM_24", "fmt": "auto", "bigshifts": 1, "tta": False}
