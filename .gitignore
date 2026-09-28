@@ -6,6 +6,9 @@
 .venv/
 venv/
 
+# 运行日志（本地排错用，UI/CLI 写 logs/uvr-lite.log，不入 git）
+/logs/
+
 # Python
 __pycache__/
 *.py[cod]

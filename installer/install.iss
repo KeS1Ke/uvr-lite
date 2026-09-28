@@ -62,6 +62,12 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 [Tasks]
 Name: "cuda"; Description: "下载 CUDA 推理引擎（约 3.3 GB，需联网；NVIDIA 显卡推荐，GPU 加速分离）"; Flags: unchecked
 
+; 运行日志目录：UI/CLI 出错时写 {app}\logs\uvr-lite.log（本地排错用，非遥测）。
+; uninsneveruninstall：卸载保留该目录——用户报障时要带旧日志，卸载不该先抹掉
+; 排错线索（日志体积由应用的 RotatingFileHandler 兜底，不会无限增长）。
+[Dirs]
+Name: "{app}\logs"; Flags: uninsneveruninstall
+
 [Files]
 ; 代码快照（uvr_lite + msst + pyproject.toml + README）→ {app}\app
 Source: "{#BundleDir}\app\*"; DestDir: "{app}\app"; Flags: recursesubdirs createallsubdirs ignoreversion
