@@ -76,7 +76,7 @@ def sha256_of(path: Path) -> str:
 
 
 # ---------- 校验缓存 ----------
-# 权重文件 640MB，每轮运行全量 SHA256 约 1s+；用 {ckpt}.verified 标记记录
+# 权重文件数百 MB，每轮运行全量 SHA256 约 1s+；用 {ckpt}.verified 标记记录
 # (size, mtime_ns)，文件未变则跳过全量哈希。标记丢失/文件变更时重新校验。
 
 def _verified_marker(ckpt: Path) -> Path:

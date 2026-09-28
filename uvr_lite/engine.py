@@ -5,7 +5,7 @@
 -> instrumental = mix - vocals（数学无损）-> 写 FLAC/WAV。
 
 会话复用：Separator 类把「模型加载」与「单文件分离」解耦——CLI 多文件与 GUI 批处理
-共用一个 Separator，模型只加载一次（640MB ckpt + 图构建约 20s，逐文件重载是最大浪费）。
+共用一个 Separator，模型只加载一次（fp16 权重约 320MB + 图构建约 20s，逐文件重载是最大浪费）。
 separate_file() 保留为薄封装（每次调用新建会话），兼容旧 API 与测试。
 """
 
@@ -138,7 +138,7 @@ class Separator:
     """引擎会话：模型只加载一次，可连续分离多个文件。
 
     CLI 多文件与 GUI 批处理都通过它复用模型，避免每文件重复加载
-    （640MB ckpt 读取 + 图构建约 20s/次）。
+    （fp16 权重读取 + 图构建约 20s/次）。
     """
 
     def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "auto",
@@ -273,7 +273,7 @@ def separate_file(
 ) -> list[Path]:
     """兼容薄封装：每次调用新建会话（模型加载一次）。
 
-    批量场景请直接创建 Separator 复用，避免每文件重载 640MB 模型。
+    批量场景请直接创建 Separator 复用，避免每文件重新加载模型。
     """
     sep = Separator(model_name=model_name, device=device, batch_size=batch_size,
                     num_overlap=num_overlap, verbose=verbose)
