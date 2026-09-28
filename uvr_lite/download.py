@@ -7,6 +7,7 @@
 """
 
 import hashlib
+import logging
 import os
 import shutil
 import socket
@@ -40,6 +41,17 @@ def repo_root() -> Path:
     按目录特征判定，见 _base_dir 注释）。
     """
     return _base_dir()
+
+
+def _log() -> logging.Logger:
+    """logger 惰性取用（log 模块的 log_dir() 反向依赖本模块的 repo_root()）。
+
+    log 与本模块顶层互相 import 会形成循环（谁先被导入谁少了对方的符号），
+    失败路径才走到这里，正常路径无额外开销。
+    """
+    from .log import get_logger
+
+    return get_logger("uvr_lite.download")
 
 
 def models_dir() -> Path:
@@ -300,6 +312,9 @@ def _download(urls: list[str], dest: Path,
             except Exception as e:
                 errors.append(f"{url}（第 {attempt + 1} 次）: {e}")
     tmp.unlink(missing_ok=True)
+    # 下载失败的细节（每个源每次重试的异常）在 UI 上只会显示一行，落盘留存文件名
+    # 与源后才有可能让用户报得出有效信息；异常消息本身保持原样不变。
+    _log().error("所有下载源均失败: %s -> %s\n%s", dest.name, urls, "\n".join(errors))
     raise RuntimeError("所有下载源均失败:\n" + "\n".join(errors))
 
 
@@ -322,6 +337,7 @@ def ensure_model(name: str, force: bool = False,
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
             return ckpt
         print(f"校验失败，重新下载: {ckpt.name}")
+        _log().warning("权重 SHA256 不匹配，删除缓存准备重新下载: %s", ckpt)
         ckpt.unlink()
 
     print(f"下载模型 {name}（{info['description']}）")
@@ -330,6 +346,9 @@ def ensure_model(name: str, force: bool = False,
     actual = sha256_of(ckpt)
     if actual != info["sha256"]:
         ckpt.unlink()
+        # 校验失败意味着下载源可能已变更（或被劫持）：留下实际哈希，便于用户
+        # 报障时确认是源变了还是网络截断。异常消息保持原样（测试会断言）。
+        _log().error("下载后 SHA256 校验失败: %s 期望 %s，实际 %s", ckpt, info["sha256"], actual)
         raise RuntimeError(
             f"SHA256 校验失败: 期望 {info['sha256']}，实际 {actual}。"
             f"下载源可能已变更，请检查 {info['ckpt_url']}"
@@ -430,6 +449,7 @@ def install_cuda_torch(base: Path | None = None,
     if actual != TORCH_CUDA_SHA256:
         wheel.unlink(missing_ok=True)
         wheel.with_suffix(wheel.suffix + ".part").unlink(missing_ok=True)
+        _log().error("CUDA 引擎 wheel SHA256 校验失败: 期望 %s，实际 %s", TORCH_CUDA_SHA256, actual)
         raise RuntimeError(
             f"SHA256 校验失败: 期望 {TORCH_CUDA_SHA256[:16]}…，实际 {actual[:16]}…。"
             f"下载源可能已变更，请稍后重试")
@@ -460,6 +480,7 @@ def install_cuda_torch(base: Path | None = None,
         # torch/__init__.py 通常最先解压出来，留下半成品会让
         # cuda_torch_installed() 误判"已就绪"，下次调用直接跳过安装 →
         # 拿到一个 import 即崩的坏 torch。wheel 缓存按承诺保留。
+        _log().warning("CUDA 引擎安装已取消，删除半成品目录: %s", dest)
         shutil.rmtree(dest, ignore_errors=True)
         raise
     wheel.unlink(missing_ok=True)

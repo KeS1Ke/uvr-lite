@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+from ..log import log_exception
 from ..models import DEFAULT_MODEL
 from .progress import ProgressTracker
 
@@ -69,6 +70,9 @@ class SeparationWorker(QObject):
                 verbose=False,
             )
         except Exception as e:
+            # 引擎加载失败（权重损坏/CUDA 不可用等）没有控制台可看 traceback，
+            # 先落盘再按原样上报给用户（信号语义不变）
+            log_exception(f"加载模型失败: {self.params.model_name}")
             for idx in range(total):
                 self.file_failed.emit(idx, friendly_error(e))
             self.all_finished.emit(0, total, False)
@@ -96,6 +100,7 @@ class SeparationWorker(QObject):
                 break
             except Exception as e:
                 failed += 1
+                log_exception(f"分离失败（第 {idx + 1}/{total} 个）: {f}")
                 self.file_failed.emit(idx, friendly_error(e))
         self.all_finished.emit(ok, failed, self._cancel)
 
@@ -129,8 +134,11 @@ class _DownloadWorker(QObject):
         try:
             self._install()
         except InterruptedError:
+            # 取消是用户主动行为，不是故障：不写日志（正常路径不该有噪声）
             self.finished.emit(False, self._cancelled_text)
         except Exception as e:
+            # 下载失败的详细原因（哪个源、第几次重试）落盘，UI 只显示一行摘要
+            log_exception(f"下载任务失败: {type(self).__name__}")
             self.finished.emit(False, str(e))
         else:
             self.finished.emit(True, "")

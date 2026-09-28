@@ -38,12 +38,18 @@ from PySide6.QtWidgets import (
 )
 
 from ..download import cuda_torch_installed, model_file, repo_root
+from ..log import get_logger, log_exception, log_hint
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import estimate_eta, summary_text
 from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationParams, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
+
+
+def _log():
+    """惰性取 logger：模块导入时不建 logs/ 目录（导入 UI 不应有文件副作用）。"""
+    return get_logger("uvr_lite.ui")
 
 PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
 
@@ -348,6 +354,8 @@ class MainWindow(QMainWindow):
                 (base / "torch.ini").write_text(
                     f"use={self.combo_device.currentText()}\n", encoding="utf-8")
             except OSError:
+                # 原先静默吞掉（只读安装目录时会发生），用户只会看到"切换没生效"
+                log_exception("写 torch.ini 失败（推理引擎切换未生效）")
                 return
             self.label_status.setText("推理引擎已切换，重启 uvr-lite 后生效。")
 
@@ -406,6 +414,8 @@ class MainWindow(QMainWindow):
         else:
             self.banner.setVisible(True)
             self.label_banner.setText(f"模型下载未完成：{error}（点击重试）")
+            # 提示条只有一行、放不下详情：完整原因留给日志（弹窗/报障时查）
+            _log().warning("模型下载失败: %s", error)
 
     # ---------- CUDA 引擎下载 ----------
 
@@ -466,6 +476,8 @@ class MainWindow(QMainWindow):
                 "CUDA 引擎安装完成。重启 uvr-lite 后，设备选择「自动」将优先使用 GPU 加速。")
         else:
             self.label_engine.setText(f"CUDA 引擎下载未完成：{error}（点击重试）")
+            # 3.3GB 下载失败的原因（源不可用/磁盘满/解压被拦）只有日志里有
+            _log().warning("CUDA 引擎下载失败: %s", error)
 
     # ---------- 任务控制 ----------
 
@@ -494,13 +506,16 @@ class MainWindow(QMainWindow):
                 bad_paths.append(p)
                 self._set_item_state(p, _PREFIX_BAD, "（格式不支持）")
         if bad_paths:
+            names = "、".join(p.name for p in bad_paths[:5]) + ("…" if len(bad_paths) > 5 else "")
             self.label_status.setText(
-                f"{len(bad_paths)} 个文件无法识别为音频，已跳过："
-                + "、".join(p.name for p in bad_paths[:5])
-                + ("…" if len(bad_paths) > 5 else ""))
+                f"{len(bad_paths)} 个文件无法识别为音频，已跳过：" + names)
+            _log().warning("%d 个文件预检失败（非音频或已损坏）: %s",
+                           len(bad_paths), names)
         if not ok_paths:
-            QMessageBox.warning(self, "没有可处理的文件",
-                                "所选文件都无法识别为音频格式，请检查文件是否损坏。")
+            # 站在用户角度这只是"选错文件"，但排错需要知道具体是哪几个文件名
+            QMessageBox.warning(
+                self, "没有可处理的文件",
+                "所选文件都无法识别为音频格式，请检查文件是否损坏。" + log_hint())
             return
 
         params = SeparationParams(
@@ -567,6 +582,8 @@ class MainWindow(QMainWindow):
         self._failed_names.append(name)
         if 0 <= file_idx < len(self._ok_paths):
             self._set_item_state(self._ok_paths[file_idx], _PREFIX_BAD)
+        # 状态栏只显示 80 字摘要，完整错误（含引擎原始异常）进日志才有得查
+        _log().warning("分离失败 %s: %s", name, error)
         self.label_status.setText(f"{name} 处理失败，已跳过（{error[:80]}）")
 
     def _on_all_finished(self, ok, failed, cancelled) -> None:
@@ -574,6 +591,9 @@ class MainWindow(QMainWindow):
         msg = summary_text(ok, self._failed_names)
         if cancelled:
             msg = f"已取消。{msg}"
+        if failed:
+            # 报错弹窗带上日志路径：非专业用户报障时可以直接把文件发过来
+            msg += log_hint()
         box = QMessageBox(self)
         box.setWindowTitle("分离完成" if not cancelled else "已取消")
         box.setText(msg)

@@ -5,6 +5,7 @@ import sys
 
 from . import __version__
 from .download import ensure_model, model_file
+from .log import log_exception, log_path
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
 
@@ -138,7 +139,15 @@ def main(argv=None) -> int:
     if not getattr(args, "command", None):
         parser.print_help()
         return 1
-    return args.func(args)
+    try:
+        return args.func(args)
+    except Exception as e:
+        # 命令层兜底：traceback 对非专业用户没有意义，落盘后给一句中文 +
+        # 日志路径；成功路径的 stdout 与退出码完全不变（失败仍是退出码 1）
+        log_exception(f"命令执行失败: {args.command}")
+        print(f"[ERROR] {args.command} 执行失败：{e}")
+        print(f"详细信息已写入日志：{log_path()}")
+        return 1
 
 
 if __name__ == "__main__":
