@@ -2,14 +2,14 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.1.2-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.3-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 ![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**A lightweight vocal / instrumental separation tool** — one model file (~640 MB), a one-click installer, two lossless stems. Ships both a **Chinese desktop GUI (Windows)** and a **CLI**.
+**A lightweight vocal / instrumental separation tool** — one model file (320 MB, fp16 safetensors), a one-click installer, two lossless stems. Ships both a **Chinese desktop GUI (Windows)** and a **CLI**.
 
 ```bash
 uvr-lite separate song.flac -o output
@@ -163,7 +163,7 @@ input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optiona
 
 - **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
 - **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed safetensors** file (320 MB; `scripts/strip_model.py` converts the original — half the size, no pickle deserialization surface, load-time is transparently cast back to fp32 with an ~-80 dB output difference). SHA256-verified, kept out of git; the downloader has built-in multi-segment concurrency and retries
-- **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 640 MB checkpoint per file
+- **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 320 MB fp16 model per file
 - **Layout**
 
 ```

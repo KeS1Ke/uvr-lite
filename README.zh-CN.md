@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-![version](https://img.shields.io/badge/version-0.1.2-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.3-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -163,7 +163,7 @@ uvr-lite install-cuda
 
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
 - **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
-- **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 640MB 权重
+- **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 320MB（fp16 瘦身版）权重
 - **代码结构**
 
 ```

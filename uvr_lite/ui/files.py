@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from pathlib import Path
 
-# 常见音频格式（librosa/soundfile 可解码的子集）
+# 常见音频格式（engine._load_audio 主链路 soundfile 可解码的子集；mp3 需 libsndfile ≥ 1.1）
 AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a"}
 
 
@@ -14,9 +14,11 @@ def is_audio(path: Path) -> bool:
 def precheck_audio(path: Path) -> bool:
     """开始分离前的快速格式预检：读取音频头判断能否解码（不完整解码）。
 
-    与 librosa 的实际解码链路一致（soundfile 优先、audioread 兜底）：
-    - flac/mp3/wav/ogg → soundfile（libsndfile 原生支持，无需外部解码器）
-    - m4a 等 → audioread 兜底（有 ffmpeg 时可用）
+    与 engine._load_audio 的实际解码链路一致（已不用 librosa，改 soundfile + soxr
+    重采样；soundfile 优先、audioread 兜底）：
+    - flac/wav/ogg → soundfile（libsndfile 原生支持，无需外部解码器）
+    - mp3 → soundfile（需 libsndfile ≥ 1.1；Windows 自带，旧 Linux 会走到兜底）
+    - m4a 等 → audioread 兜底（需系统 ffmpeg）
     文件内容真是音频时，即使后缀被改成 doc/txt 也能识别；真 Word 等非音频被拒绝。
     """
     import soundfile as sf
