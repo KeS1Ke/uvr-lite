@@ -7,7 +7,7 @@
 | 术语 | 定义 |
 |---|---|
 | **分离（separate）** | 将一段混合音频拆成两条音轨：人声（vocals）与伴奏（instrumental）。伴奏 = 原曲 − 人声（数学无损）。 |
-| **模型（model）** | 训练好的分离网络权重（`.ckpt`）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
+| **模型（model）** | 训练好的分离网络权重，当前分发 fp16 safetensors（`*.lite.safetensors`；历史 `.ckpt` 格式仍可加载，engine 按扩展名分流）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
 | **引擎（engine）** | `uvr_lite/engine.py` 的分离执行层，提供 `separate_file()` 纯函数接口（输入/输出/参数）。 |
 | **进度回调（progress_callback）** | 引擎向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。 |
 | **取消（cancel）** | 用户中止当前任务。引擎收到回调返回 `False` 后抛 `CancelledError`；UI 清理半成品输出。 |
@@ -36,5 +36,5 @@
 
 ## 决策索引
 
-- ADR-001：UI 外包装（UI/引擎接口/分发全套决策，24 条 + 5 项默认）；2026-08-03 更新：分发改为 **Inno Setup 全量安装包**（内置绿色 Python + 双 torch + fp16 模型，用户免联网下载；此前 PyInstaller 向导因收集 bug 弃用、NSIS 因 ~2GB 上限弃用）
+- ADR-001：UI 外包装（UI/引擎接口/分发全套决策，24 条 + 5 项默认）；2026-08-03 更新：分发改为 **Inno Setup 全量安装包**（内置绿色 Python 3.12 + CPU/CUDA 双 torch + fp16 模型，用户免联网下载；此前 PyInstaller 向导因收集 bug 弃用、NSIS 因 ~2GB 上限弃用）。**该「双 torch 内置」形态已于 2026-09 废止（CUDA torch 降为可勾选联网下载），见下一条**
 - 2026-09 修订（同一条目的演变）：改为 **单包半在线**——只出单个 `uvr-lite-setup_v{version}.exe`，base 内置 CPU torch + fp16 模型离线可用，CUDA 引擎降为安装时可勾选的联网下载任务（或事后 `uvr-lite install-cuda` 补装），故不再有 cpu/full 两个安装包变体；同步补记「运行日志」条目

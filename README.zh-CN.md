@@ -31,15 +31,15 @@ uvr-lite separate 歌曲.flac -o output
 - **一键部署**：`install.bat`（Windows）/ `install.sh`（Linux/macOS）自动完成 venv + 依赖 + torch（CPU/CUDA 自动分流）+ 模型下载（SHA256 校验）+ 冒烟测试
 - **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（约 3 分钟）约 **51 秒**
 - **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
-- **无 GUI、无训练代码**：仅推理，仓库代码 < 1 MB
+- **无训练代码**：仅推理，仓库代码 < 1 MB
 - 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
 
 ## 桌面界面（Windows，推荐非专业用户）
 
 **下载**（只需一个安装包，人人适用）：
-- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) —— **约 283 MB**，内置 CPU 版 torch（任何电脑都能跑）
+- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) —— **约 283 MB**，内置 CPU 版 torch（64 位 Windows 10 及以上）
 
-基础包**离线自包含**——Python、CPU 版 PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半，输出差异不可闻）全部内置，安装过程无需联网。**CUDA 引擎**（NVIDIA 显卡 GPU 加速）为可选组件，按需联网下载（半在线模式，与 UVR 官方同策略）：
+基础包**离线自包含**——Python、CPU 版 PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半；639 MB 取自上游说明，本仓库未独立核实）全部内置，安装过程无需联网。**CUDA 引擎**（NVIDIA 显卡 GPU 加速）为可选组件，按需联网下载（半在线模式，与 UVR 官方同策略）：
 
 1. **双击安装**，选择安装位置（默认：你的用户目录）——所有文件装进一个文件夹，不会散落
 2. **可选**：有 NVIDIA 显卡的话勾选「**下载 CUDA 推理引擎**」（下载约 3.3 GB，磁盘占用约 4.9 GB）——安装中联网下载，带进度页 + SHA256 校验；不勾选也完全不影响使用，以后随时可补装
@@ -142,7 +142,7 @@ uvr-lite install-cuda
 | `--device` | `auto`（默认）/ `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
 | `--batch-size N` | 推理批大小（默认取模型配置）；低显存 GPU 可设 `1` 防 OOM |
-| `--num-overlap N` | 重叠窗口数（质量/速度开关）：`1` 最快约 2 倍，`2` 默认，更大更稳 |
+| `--num-overlap N` | 重叠窗口数（质量/速度开关）：`1` 最快约 2 倍；默认取模型配置（主力 2 / karaoke 4），显式传值才覆盖 |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
 
 **注意事项**
@@ -162,7 +162,7 @@ uvr-lite install-cuda
 ```
 
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
-- **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理，输出差异约 -80 dB 不可闻）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
+- **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
 - **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 320MB（fp16 瘦身版）权重
 - **代码结构**
 

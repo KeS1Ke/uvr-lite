@@ -37,7 +37,7 @@ echo "[4/5] Installing uvr-lite and dependencies ..."
 pip install --quiet -e .
 
 # ---- 5. download model (SHA256 verified) ----
-echo "[5/5] Downloading model weights (~640 MB, SHA256 verified) ..."
+echo "[5/5] Downloading model weights (~320 MB, SHA256 verified) ..."
 uvr-lite download
 
 # ---- smoke test (GPU only; CPU too slow) ----

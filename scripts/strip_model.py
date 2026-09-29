@@ -1,9 +1,20 @@
-"""模型瘦身：fp32 ckpt → fp16 存储（体积减半，推理精度不变）。
+"""模型瘦身：fp32 ckpt → fp16 存储（存储体积减半、无 pickle 载入面）。
 
-背景：viperx/aufr33 发布的 ckpt 顶层就是纯 state_dict（699 个 fp32 tensor，
-159.8M 参数 = 639MB），没有可剥离的 optimizer/EMA 训练态。瘦身唯一有效路径
-是 fp16 存储：torch.load 后 load_state_dict 会自动上转回 fp32，推理输出与
-原版差异约 -58dB（实测相对误差 0.84%，不可闻），内存/速度均不变。
+背景：viperx/aufr33 发布的 ckpt 顶层就是纯 state_dict（699 个 tensor，
+159.8M 参数；上游原版为 fp32，体积按上游记为 639MB——本仓库未独立核实，
+见下），没有可剥离的 optimizer/EMA 训练态。瘦身唯一有效路径是 fp16 存储：
+torch.load 后 load_state_dict 会自动上转回 fp32，内存/速度均不变。
+
+精度口径（2026-09 订正；本仓库未做 fp32→fp16 端到端实测，故不再给出无口径的 dB）：
+  - 权重级（可从定义推导）：fp16 规格化数单位舍入步长 2^-11 ≈ 0.049%
+    （-66.2 dB）；单个权重的相对误差不超过它，整网误差按累加方式另计。
+  - 输出级（音频 A/B 差异 dB）：需要 fp32 原版权重 + 同输入对比推理才能测。
+    该原版不在本机——models/bs_roformer_ep317.ckpt 已是上一轮瘦身产物
+    （699 个 tensor 全部 float16），且与分发的 .lite.safetensors 逐张量
+    bitwise 相同；拿它再跑一次本脚本只会得到同内容副本（误差恒为 0，属
+    假数据），因此本仓库不提供任何输出级 dB 数字。历史上此处曾写有一个未标
+    口径的 dB 值与一个未标口径的相对误差百分比，两者互相矛盾，已随本次订正
+    删除（历史数字与推导见 docs/adr/ADR-001-ui-wrapper.md 的 2026-09 T11 注记）。
 
 用法:
   python scripts/strip_model.py <输入.ckpt> <输出.ckpt> [--format ckpt|safetensors]

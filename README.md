@@ -31,15 +31,15 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 - **One-click install**: `install.bat` (Windows) / `install.sh` (Linux/macOS) — venv + dependencies + torch (CPU/CUDA auto-detection) + model download (SHA256 verified) + smoke test
 - **Primary model**: BS-RoFormer ep317 (trained by viperx, SDR ≈ 10.9–12.9 dB) — a full track (~3 min) takes about **51 s** on an RTX 4060
 - **Lossless output**: FLAC (16/24 bit) or WAV, original 44.1 kHz sample rate preserved
-- **No GUI, no training code**: inference only, repo code < 1 MB
+- **No training code**: inference only, repo code < 1 MB
 - Optional second model: `mel_band_karaoke` (Mel-Band RoFormer Karaoke, trained by aufr33 & viperx)
 
 ## Desktop GUI (Windows, recommended for non-technical users)
 
 **Download** — one installer for everyone:
-- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) — **~283 MB**, CPU torch built in (runs on any PC)
+- [uvr-lite-setup.exe](https://github.com/KeS1Ke/uvr-lite/releases/latest/download/uvr-lite-setup.exe) — **~283 MB**, CPU torch built in (64-bit Windows 10 or later)
 
-The base package is **self-contained** — Python, CPU PyTorch and the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB with inaudible output difference) are all inside; no downloads during installation. The **CUDA engine** (NVIDIA GPU acceleration) is optional and downloaded on demand (semi-online, same approach as UVR official):
+The base package is **self-contained** — Python, CPU PyTorch and the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB, a size figure taken from upstream notes and not independently verified here) are all inside; no downloads during installation. The **CUDA engine** (NVIDIA GPU acceleration) is optional and downloaded on demand (semi-online, same approach as UVR official):
 
 1. **Double-click** the installer; pick an install location (default: your user folder) — everything lands in one folder, no scattering
 2. **Optional**: tick "下载 CUDA 推理引擎" (downloads ~3.3 GB, ~4.9 GB on disk) if you have an NVIDIA GPU — fetched during install with a progress page + SHA256 verification; skip it and add it later any time
@@ -142,7 +142,7 @@ uvr-lite install-cuda
 | `--device` | `auto` (default) / `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | Number of circular time-shift passes; >1 improves quality at linear cost (default 1) |
 | `--batch-size N` | Inference batch size (default from model config); set `1` on low-VRAM GPUs |
-| `--num-overlap N` | Overlapping chunk count (speed/quality knob): `1` = no overlap (~2× faster), `2` = default, higher = smoother edges |
+| `--num-overlap N` | Overlapping chunk count (speed/quality knob): `1` = no overlap (~2× faster); default from model config (2 for the primary model, 4 for karaoke) — pass a value to override |
 | `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
 
 **Notes**
@@ -162,7 +162,7 @@ input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optiona
 ```
 
 - **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
-- **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed safetensors** file (320 MB; `scripts/strip_model.py` converts the original — half the size, no pickle deserialization surface, load-time is transparently cast back to fp32 with an ~-80 dB output difference). SHA256-verified, kept out of git; the downloader has built-in multi-segment concurrency and retries
+- **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed safetensors** file (320 MB; `scripts/strip_model.py` converts the original — half the size, no pickle deserialization surface, load-time transparently casts back to fp32 for inference). SHA256-verified, kept out of git; the downloader has built-in multi-segment concurrency and retries
 - **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 320 MB fp16 model per file
 - **Layout**
 

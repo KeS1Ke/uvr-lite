@@ -47,7 +47,7 @@ pip install -e . --quiet
 if errorlevel 1 ( echo [ERROR] dependency installation failed & pause & exit /b 1 )
 
 REM ---- 5. download model (SHA256 verified) ----
-echo [5/5] Downloading model weights (~640 MB, SHA256 verified) ...
+echo [5/5] Downloading model weights (~320 MB, SHA256 verified) ...
 uvr-lite download
 if errorlevel 1 ( echo [ERROR] model download failed & pause & exit /b 1 )
 

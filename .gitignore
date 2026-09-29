@@ -1,4 +1,4 @@
-# 模型权重（640MB+，由 `uvr-lite download` 获取，不入 git）
+# 模型权重（默认模型 fp16 safetensors ~320MB，由 `uvr-lite download` 获取，不入 git）
 /models/
 *.part
 
@@ -28,6 +28,9 @@ _smoke*
 
 # graphify 知识图谱（/graphify 生成，可随时重建，不入 git）
 graphify-out/
+
+# Agent/工具临时产物（权重转换实测等，可随时重建，不入 git）
+.artifacts/
 
 # ZCode 客户端计划产物
 .zcode/
