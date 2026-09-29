@@ -37,11 +37,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..download import cuda_torch_installed, model_file, repo_root
 from ..log import ensure_log_dir, get_logger, log_exception, log_hint, log_path
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
-from .progress import estimate_eta, summary_text
+from .progress import PHASE_CN, estimate_eta, summary_text
 from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationParams, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
@@ -63,7 +64,6 @@ def _log_file_text() -> str:
     except Exception:
         return ""
 
-PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
 
 MODEL_LABELS = {
     "bs_roformer_ep317": "BS-RoFormer ep317（主力，推荐）",
@@ -113,7 +113,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.settings = QSettings("uvr-lite", "uvr-lite")
         self._paths: list[Path] = []
-        self.setWindowTitle("uvr-lite 人声/伴奏分离")
+        # 版本号放标题：界面里没有别的出口（cli --version 用户看不到），标题截图即报障信息
+        self.setWindowTitle(f"uvr-lite 人声/伴奏分离 {__version__}")
         self.setWindowIcon(QIcon(str(_ICON)))
         self.setAcceptDrops(True)
         self.resize(640, 620)
@@ -589,7 +590,6 @@ class MainWindow(QMainWindow):
         self._t_file = time.time()
         self._file_times: list[float] = []
         self._failed_names: list[str] = []
-        self._ok_count = 0
         self._ok_paths = ok_paths  # 队列索引 → 文件（列表状态标记用）
         for p in ok_paths:
             self._set_item_state(p, _PREFIX_PENDING)
@@ -617,15 +617,17 @@ class MainWindow(QMainWindow):
     def _on_file_done(self, file_idx, written) -> None:
         self._file_times.append(time.time() - self._t_file)
         self._t_file = time.time()
-        self._ok_count += 1
         if 0 <= file_idx < len(self._ok_paths):
             self._set_item_state(self._ok_paths[file_idx], _PREFIX_OK)
 
     def _on_file_failed(self, file_idx, error) -> None:
-        name = self._ok_paths[file_idx].name
+        # 先判范围再索引（与 _on_file_done 一致）：槽函数里抛 IndexError 会直接冒到
+        # Qt 事件循环，用户看到的是崩溃而不是"某个文件失败"
+        path = self._ok_paths[file_idx] if 0 <= file_idx < len(self._ok_paths) else None
+        name = path.name if path is not None else f"未知文件（队列索引 {file_idx}）"
         self._failed_names.append(name)
-        if 0 <= file_idx < len(self._ok_paths):
-            self._set_item_state(self._ok_paths[file_idx], _PREFIX_BAD)
+        if path is not None:
+            self._set_item_state(path, _PREFIX_BAD)
         # 状态栏只显示 80 字摘要，完整错误（含引擎原始异常）进日志才有得查
         _log().warning("分离失败 %s: %s", name, error)
         self.label_status.setText(f"{name} 处理失败，已跳过（{error[:80]}）")

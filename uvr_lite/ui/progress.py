@@ -1,10 +1,15 @@
 """推理接线的纯逻辑（无 Qt 依赖，可单测）。
 
+- PHASE_CN: 阶段中文名（状态栏与 ProgressTracker 共用的阶段名单）
 - ProgressTracker: 阶段回调 → 文件内进度 0..1
 - estimate_eta: 按历史平均耗时估算剩余时间
 - summary_text: 队列结束汇总文案
 """
 
+# 阶段中文名：单一来源——ui/main.py 从这里导入，不再自建第二张表（两份词表漂移时
+# 状态栏会显示未翻译的阶段名）。键集合必须与 ProgressTracker.on_progress 认识的阶段
+# 一致：漂移会让进度条停在该阶段起点，tests/test_ui_files.py 有按键遍历的行为守卫。
+PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
 
 
 class ProgressTracker:
@@ -19,6 +24,7 @@ class ProgressTracker:
         self._pass_done = 0
 
     def on_progress(self, phase: str, done: int, total: int) -> float:
+        # 分支里的阶段名即 PHASE_CN 的键（不引用常量，保持本模块纯逻辑、不因词表变动而变行为）
         if phase == "decode":
             return 0.05 * (done / total if total else 0)
         if phase == "chunk":
