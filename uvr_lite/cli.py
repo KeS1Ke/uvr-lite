@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import __version__
-from .download import ensure_model, model_file
+from .download import ensure_model, model_file, retired_model_files
 from .log import log_exception, log_hint
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
@@ -71,6 +71,13 @@ def _cmd_models(args: argparse.Namespace) -> int:
         status = f"{path.stat().st_size / 1e6:.0f} MB" if path.exists() else "未下载"
         print(f"{name:<20} {info['model_type']:<18} {status}")
         print(f"  {info['description']}")
+        # 退役权重（升级换格式后的旧文件）不会再被任何代码路径碰到，只有
+        # ensure_model 在新权重就绪后回收它；这里把「还占着盘」的列出来，
+        # 用户才知道重跑一次 download 能省多少空间（不存在则静默跳过）
+        for old in retired_model_files(name):
+            if old.exists():
+                print(f"  可回收: {old.name}（{old.stat().st_size / 1e6:.0f} MB）"
+                      "——新权重校验通过后自动删除")
     print(f"\n默认模型: {DEFAULT_MODEL}")
     return 0
 
