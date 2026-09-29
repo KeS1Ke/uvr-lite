@@ -20,9 +20,10 @@ MODEL_REGISTRY: dict[str, dict] = {
             "models/bs_roformer_ep317.lite.safetensors"
         ),
         "mirror_urls": [],
-        # fp16 safetensors 版 SHA（由 strip_model.py 转换生成）；旧格式本地
-        # 缓存校验不匹配会被自动删除重下（一次性迁移机制）
+        # fp16 safetensors 版 SHA（由 strip_model.py 转换生成）；retired_filenames
+        # 记录历史分发物（.ckpt 时代的本地名），新权重就绪后由 ensure_model 回收
         "sha256": "97307b43fa9a830a80e7d382fab39a746b2a0777ba38cf4d1c7432ef77ad19a2",
+        "retired_filenames": ["bs_roformer_ep317.ckpt"],
         "description": ("BS-RoFormer ep317（viperx 训练，fp16 safetensors 版）："
                         "人声/伴奏分离主力模型，SDR ≈ 10.9-12.9 dB"),
     },
@@ -36,6 +37,8 @@ MODEL_REGISTRY: dict[str, dict] = {
         ),
         "mirror_urls": [],
         "sha256": "fbf51a0baf307334c93f7162e8515f32cad2bd453f3f82d0a1eaf0f02424e60b",
+        # .ckpt 时代的本地名取注册表键（当时无 filename 字段，回退 {name}.ckpt）
+        "retired_filenames": ["mel_band_karaoke.ckpt"],
         "description": ("Mel-Band RoFormer Karaoke（aufr33 & viperx 训练，"
                         "fp16 safetensors 版）：备选模型"),
     },

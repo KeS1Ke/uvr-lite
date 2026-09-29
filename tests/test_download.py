@@ -1,7 +1,9 @@
 """票 4（tdd）：模型下载的进度回调、取消续传与多源回退（本地 HTTP 服务）。"""
 
+import contextlib
 import hashlib
 import http.server
+import logging
 import os
 import re
 import threading
@@ -227,7 +229,7 @@ def test_ensure_model_marks_verified(fake_download_env):
 
 
 def test_ensure_model_verified_marker_skips_hash(fake_download_env, monkeypatch):
-    """标记命中（size+mtime 未变）→ 跳过全量 SHA256（640MB 读盘成本）。"""
+    """标记命中（size+mtime 未变）→ 跳过全量 SHA256（~320MB 读盘成本）。"""
     ckpt = fake_download_env / "test_model.ckpt"
     ckpt.write_bytes(DATA)
     dl.ensure_model("test_model")  # 首次：全量校验 + 写标记
@@ -432,3 +434,257 @@ def test_ensure_model_respects_registry_filename(http_server, tmp_path, monkeypa
     p = dl.ensure_model("test_model")
     assert p.name == "test_model.lite.safetensors"
     assert p.read_bytes() == DATA
+
+
+# ---------- 全部源失败：保留已下载分片（续传承诺） ----------
+
+# 失败现场专用数据：16MiB → 8 段的段长 2MiB > 断流量 1MiB。数据再小的话，
+# 重试一次就把段写满（_download_segment 只比较已下字节与段尾），下载反而成功。
+FAIL_DATA = bytes(range(256)) * ((16 << 20) // 256)
+
+
+class _TruncatedSourceHandler(http.server.BaseHTTPRequestHandler):
+    """探测阶段正常应答、实际下载中途断流的源。
+
+    range_ok=False 探测回 200（单连接路径）；range_ok=True 探测回 206（分段路径）。
+    断流刻意用 chunked 半截响应：若用「Content-Length 声明足量 + 提前关连接」，
+    http.client 对分段 read 是静默截断（返回 b""），构造不出下载失败。
+    """
+
+    protocol_version = "HTTP/1.1"
+    range_ok = False
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if self.headers.get("Range") == "bytes=0-0":  # _probe_range 的探测请求
+            if self.range_ok:
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes 0-0/{len(FAIL_DATA)}")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", "1")
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(FAIL_DATA)))
+            self.end_headers()
+            return
+        # 实际下载：发一段后断连（不发 0 长度结束块）→ 客户端 IncompleteRead。
+        # chunk 必须 ≥ download.py 的 1MB 读缓冲：chunked 已读字节一旦小于一次
+        # read 的请求量，http.client 会把它塞进 IncompleteRead 异常返回，
+        # 一个字节都落不了盘，就构造不出「有残留分片」的失败现场。
+        self.send_response(200)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        chunk = FAIL_DATA[: 1 << 20]
+        self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+
+class _TruncatedRangeSourceHandler(_TruncatedSourceHandler):
+    range_ok = True
+
+
+def _start_server(handler_cls):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.fixture
+def truncated_source():
+    server = _start_server(_TruncatedSourceHandler)
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+@pytest.fixture
+def truncated_range_source():
+    server = _start_server(_TruncatedRangeSourceHandler)
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def test_download_all_sources_fail_keeps_part(truncated_source, tmp_path):
+    """全源失败后必须保留单连接已下载的 .part，否则续传承诺失效。
+
+    回归：失败收尾曾有 tmp.unlink()，把续传了一半的 .part 删掉，与模块
+    docstring「保留 .part 供续传」及 UI 的续传提示相反。残留分片不会被误当
+    完整数据——下次下载按 HTTP 状态选 ab/wb 续传，落盘后仍过 SHA256 校验。
+    """
+    dest = tmp_path / "m.ckpt"
+    with pytest.raises(RuntimeError, match="所有下载源均失败"):
+        dl._download([f"{truncated_source}/model.bin"], dest, retries=0)
+    part = dest.with_suffix(".ckpt.part")
+    assert part.exists(), "全源失败后应保留 .part 供续传"
+    assert part.stat().st_size > 0
+
+
+def test_download_all_sources_fail_keeps_segments(truncated_range_source, tmp_path, monkeypatch):
+    """分段路径全失败后同样保留 .part.s*（与单连接同一续传承诺）。"""
+    monkeypatch.setattr(dl, "PARALLEL_MIN_SIZE", 1)  # FAIL_DATA（16MiB）也走分段
+    dest = tmp_path / "m.ckpt"
+    with pytest.raises(RuntimeError, match="所有下载源均失败"):
+        dl._download([f"{truncated_range_source}/model.bin"], dest, retries=0)
+    parts = sorted(tmp_path.glob("*.part.s*"))
+    assert parts, "分段路径全失败后应保留段文件供续传"
+    assert all(p.stat().st_size > 0 for p in parts)
+
+
+def test_download_all_sources_fail_keeps_part_and_segments(
+        truncated_source, truncated_range_source, tmp_path, monkeypatch):
+    """多源全失败时，单连接残留的 .part 与分段残留的 .part.s* 必须同时保留。
+
+    CUDA 引擎下载就是多源列表；先试单连接源、再试支持 Range 的源时，两代
+    分片会同时存在——失败收尾删掉 .part 等于丢掉前一个源已下好的续传进度。
+    """
+    monkeypatch.setattr(dl, "PARALLEL_MIN_SIZE", 1)
+    dest = tmp_path / "m.ckpt"
+    urls = [f"{truncated_source}/model.bin", f"{truncated_range_source}/model.bin"]
+    with pytest.raises(RuntimeError, match="所有下载源均失败"):
+        dl._download(urls, dest, retries=0)
+    part = dest.with_suffix(".ckpt.part")
+    assert part.exists() and part.stat().st_size > 0, "单连接残留分片被删除"
+    assert list(tmp_path.glob("*.part.s*")), "分段残留分片被删除"
+
+
+def test_parallel_merge_leaves_no_residue(range_server, tmp_path, monkeypatch):
+    """真正走分段路径且下载成功时，合并后不留段文件残渣。
+
+    test_parallel_download_matches_single 的 4MiB 小于 PARALLEL_MIN_SIZE（64MB），
+    实际走的是单连接，未覆盖分段合并；这里显式压低阈值让分段路径生效。
+    """
+    monkeypatch.setattr(dl, "PARALLEL_MIN_SIZE", 1)
+    dest = tmp_path / "big.ckpt"
+    dl._download([f"{range_server}/big.bin"], dest)
+    assert dest.read_bytes() == DATA
+    assert not list(tmp_path.glob("*.part*"))
+
+
+# ---------- 退役权重回收（升级换格式后的旧 .ckpt） ----------
+
+class _LogCollector(logging.Handler):
+    """收集 uvr_lite.download 真实 logger 放行的记录。"""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _download_log():
+    """捕获 download 模块的日志记录。
+
+    直接往目标 logger 挂 handler 而不用 caplog：log.py:79 把 propagate 置 False，
+    caplog 的 root handler 收不到。这样写还顺带验证了这条日志确实能被落盘配置
+    放行——logger 级别是 WARNING（log.py:78），INFO 会被静默丢掉。
+    """
+    collector = _LogCollector()
+    logger = dl._log()
+    logger.addHandler(collector)
+    try:
+        yield collector.messages
+    finally:
+        logger.removeHandler(collector)
+
+
+def _retired_env(monkeypatch, tmp_path, **entry_overrides):
+    """注册表指向临时目录：新权重 test_model.lite.safetensors + 退役 test_model.ckpt。"""
+    fields = {"filename": "test_model.lite.safetensors",
+              "retired_filenames": ["test_model.ckpt"]}
+    fields.update(entry_overrides)
+    entry = _entry(**fields)
+    monkeypatch.setattr("uvr_lite.models.MODEL_REGISTRY", {"test_model": entry})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    return entry
+
+
+@pytest.mark.parametrize("with_marker", [True, False], ids=["标记命中", "全量哈希通过"])
+def test_ensure_model_reclaims_retired_ckpt(with_marker, monkeypatch, tmp_path):
+    """新权重就绪（标记命中或全量哈希通过）后回收退役权重，并留下日志。
+
+    回归：filename 从 *.ckpt 换成 *.lite.safetensors 后，旧的 320MB .ckpt
+    不再被任何代码路径碰到，成为升级后永不回收的孤儿。
+    """
+    _retired_env(monkeypatch, tmp_path)
+    new = tmp_path / "test_model.lite.safetensors"
+    new.write_bytes(DATA)
+    if with_marker:
+        dl._mark_verified(new)
+    old = tmp_path / "test_model.ckpt"
+    old.write_bytes(b"legacy" * 100)
+    dl._mark_verified(old)
+
+    with _download_log() as messages:
+        assert dl.ensure_model("test_model") == new
+    assert not old.exists(), "新权重就绪后应回收退役权重"
+    assert not dl._verified_marker(old).exists(), "退役权重的校验标记应一并回收"
+    assert any("test_model.ckpt" in m for m in messages), f"回收未写日志: {messages}"
+
+
+def test_ensure_model_reclaims_after_forced_download(http_server, tmp_path, monkeypatch):
+    """force=True 重下并校验通过（属就绪）后同样回收退役权重。"""
+    entry = _fake_registry(http_server)["test_model"]
+    entry["filename"] = "test_model.lite.safetensors"
+    entry["retired_filenames"] = ["test_model.ckpt"]
+    monkeypatch.setattr("uvr_lite.models.MODEL_REGISTRY", {"test_model": entry})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    (tmp_path / "test_model.ckpt").write_bytes(b"legacy")
+
+    with _download_log() as messages:
+        p = dl.ensure_model("test_model", force=True)
+    assert p.read_bytes() == DATA
+    assert not (tmp_path / "test_model.ckpt").exists()
+    assert any("test_model.ckpt" in m for m in messages)
+
+
+def test_ensure_model_missing_new_keeps_retired_ckpt(monkeypatch, tmp_path):
+    """新权重缺失且下载失败 → 绝不删退役权重（否则用户一份可用的都不剩）。"""
+    _retired_env(monkeypatch, tmp_path)
+    old = tmp_path / "test_model.ckpt"
+    old.write_bytes(b"legacy")
+
+    with pytest.raises(RuntimeError, match="所有下载源均失败"):
+        dl.ensure_model("test_model")
+    assert old.read_bytes() == b"legacy", "新权重未就绪时不得删退役权重"
+
+
+def test_ensure_model_corrupt_new_keeps_retired_ckpt(monkeypatch, tmp_path):
+    """新权重存在但损坏、重下又失败 → 此时仍无可用权重，退役权重必须保留。"""
+    _retired_env(monkeypatch, tmp_path)
+    (tmp_path / "test_model.lite.safetensors").write_bytes(b"corrupt")
+    old = tmp_path / "test_model.ckpt"
+    old.write_bytes(b"legacy")
+
+    with pytest.raises(RuntimeError, match="所有下载源均失败"):
+        dl.ensure_model("test_model")
+    assert old.read_bytes() == b"legacy"
+
+
+def test_ensure_model_never_deletes_current_weight(monkeypatch, tmp_path):
+    """retired_filenames 误列当前 filename 时，不得删掉刚校验通过的权重。"""
+    _retired_env(monkeypatch, tmp_path,
+                 retired_filenames=["test_model.lite.safetensors"])
+    new = tmp_path / "test_model.lite.safetensors"
+    new.write_bytes(DATA)
+    dl._mark_verified(new)
+
+    assert dl.ensure_model("test_model") == new
+    assert new.exists(), "当前权重被 retired_filenames 误删"
+
+
+def test_model_file_follows_retired_filenames(monkeypatch, tmp_path):
+    """退役路径同样以注册表为准，且只给路径、不碰文件。"""
+    from uvr_lite import models
+
+    monkeypatch.setattr(models, "MODEL_REGISTRY", {"test_model": _entry(
+        filename="test_model.lite.safetensors",
+        retired_filenames=["test_model.ckpt", "test_model.old.ckpt"])})
+    monkeypatch.setattr(dl, "models_dir", lambda: tmp_path)
+    assert dl.retired_model_files("test_model") == [
+        tmp_path / "test_model.ckpt", tmp_path / "test_model.old.ckpt"]
+    assert list(tmp_path.iterdir()) == [], "只查路径不应创建/删除文件"

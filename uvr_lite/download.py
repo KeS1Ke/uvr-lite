@@ -1,11 +1,14 @@
-"""模型下载：从主源拉取权重到 models/ 目录，带 SHA256 完整性校验。
+"""模型下载：从注册表列出的下载源拉取权重到 models/ 目录，带 SHA256 完整性校验。
 
-- 断点续传：`.part` 文件已存在时用 HTTP Range 头续传，避免中断后全量重下
-- 多源回退：主源（GitHub Releases）失败时自动切换 HuggingFace 镜像
+- 断点续传：`.part`（多分段时 `.part.s0..sN`）已存在时用 HTTP Range 头续传，
+  避免中断后全量重下；取消与全部源失败都保留已下载分片
+- 多源回退：按 ckpt_url → mirror_urls 顺序尝试，逐个失败才报错；注册表当前
+  mirror_urls 为空（未发布同内容镜像，原因见 models.py），实际只有主源
 
-权重文件大（639MB+），不入 git；安装脚本与首次分离前自动调用本模块。
+权重为数百 MB 量级，不入 git；安装脚本与首次分离前自动调用本模块。
 """
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -85,6 +88,16 @@ def sha256_of(path: Path) -> str:
         while chunk := f.read(1 << 20):
             h.update(chunk)
     return h.hexdigest()
+
+
+def retired_model_files(name: str) -> list[Path]:
+    """退役（旧分发物）权重的本地路径，由注册表 retired_filenames 决定。
+
+    与 model_file 同一权威来源（filename/retired_filenames 都在注册表里）；
+    只给出路径，不判断存在性、不碰文件。CLI 的 models 列表可据此提示可回收项。
+    """
+    info = get_model_info(name)
+    return [models_dir() / fn for fn in info.get("retired_filenames", [])]
 
 
 # ---------- 校验缓存 ----------
@@ -292,7 +305,8 @@ def _download(urls: list[str], dest: Path,
     """按顺序尝试各下载源（每源最多重试 retries 次）；全部失败才报错。
 
     大文件（≥64MB）且源支持 Range 时走多连接分段下载（提速）；
-    否则单连接。用户取消（InterruptedError）不切换源、保留 .part 供续传。
+    否则单连接。取消（InterruptedError）不切换源；取消与全部源失败都保留
+    已下载分片（.part / .part.s*），下次从断点续传。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -311,11 +325,40 @@ def _download(urls: list[str], dest: Path,
                 raise
             except Exception as e:
                 errors.append(f"{url}（第 {attempt + 1} 次）: {e}")
-    tmp.unlink(missing_ok=True)
+    # 全部源失败也保留已下载分片（单连接 .part / 分段 .part.s0..sN）：下次仍可
+    # 按 Range 续传；残留分片不会被误当完整数据——ab/wb 由响应状态决定，
+    # 落盘后还要过 SHA256 校验。
     # 下载失败的细节（每个源每次重试的异常）在 UI 上只会显示一行，落盘留存文件名
     # 与源后才有可能让用户报得出有效信息；异常消息本身保持原样不变。
     _log().error("所有下载源均失败: %s -> %s\n%s", dest.name, urls, "\n".join(errors))
     raise RuntimeError("所有下载源均失败:\n" + "\n".join(errors))
+
+
+def _reclaim_retired(name: str, ckpt: Path) -> None:
+    """回收退役的旧分发物（升级换权重格式后的一次性清理）。
+
+    只允许在「新权重已就绪」之后调用：新权重还没拿到就删旧文件，用户手里
+    一份可用的权重都不剩。删除失败（被占用/权限不足）只记日志，不影响使用。
+
+    日志用 WARNING 而非 INFO：log.py 只让 WARNING 及以上落盘（见其模块注释），
+    INFO 记录等于没记；删掉数百 MB 用户文件也该在报障日志里留痕。
+    """
+    for old in retired_model_files(name):
+        if old == ckpt or not old.exists():
+            # 注册表把当前 filename 误列进 retired 时，绝不能删刚校验通过的权重
+            continue
+        try:
+            size = old.stat().st_size
+            old.unlink()
+        except OSError as e:
+            _log().warning("退役权重回收失败（不影响使用）: %s: %s", old, e)
+            continue
+        # {old}.verified 是它的附属物，一并回收，否则留下指向空文件的孤儿；
+        # 标记只是校验缓存，删不掉也无害，不打断回收流程
+        with contextlib.suppress(OSError):
+            _verified_marker(old).unlink(missing_ok=True)
+        _log().warning("已回收退役权重: %s（%.0f MB），当前使用 %s",
+                       old.name, size / 1e6, ckpt.name)
 
 
 def ensure_model(name: str, force: bool = False,
@@ -324,6 +367,8 @@ def ensure_model(name: str, force: bool = False,
 
     校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过全量哈希。
     权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
+    新权重就绪（标记命中 / 哈希通过 / 下载后校验通过）才回收注册表里声明的
+    退役权重（retired_filenames，见 models.py）；未就绪时不动任何文件。
     """
     info = get_model_info(name)
     ckpt = model_file(name)
@@ -331,10 +376,12 @@ def ensure_model(name: str, force: bool = False,
     if ckpt.exists() and not force:
         if _check_verified(ckpt):
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
+            _reclaim_retired(name, ckpt)
             return ckpt
         if sha256_of(ckpt) == info["sha256"]:
             _mark_verified(ckpt)
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
+            _reclaim_retired(name, ckpt)
             return ckpt
         print(f"校验失败，重新下载: {ckpt.name}")
         _log().warning("权重 SHA256 不匹配，删除缓存准备重新下载: %s", ckpt)
@@ -355,6 +402,7 @@ def ensure_model(name: str, force: bool = False,
         )
     _mark_verified(ckpt)
     print(f"完成: {ckpt}（{ckpt.stat().st_size / 1e6:.0f} MB）")
+    _reclaim_retired(name, ckpt)
     return ckpt
 
 
