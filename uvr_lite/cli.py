@@ -5,7 +5,7 @@ import sys
 
 from . import __version__
 from .download import ensure_model, model_file
-from .log import log_exception, log_path
+from .log import log_exception, log_hint
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
 
 
@@ -99,7 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sep.add_argument("--batch-size", type=int, default=None,
                        help="推理批大小（默认取模型配置；低显存 GPU 可设 1 防 OOM）")
     p_sep.add_argument("--num-overlap", type=int, default=None,
-                       help="重叠窗口数（质量/速度开关：1 最快约 2x，2 默认，更大更慢更稳）")
+                       help="重叠窗口数（质量/速度开关：1 最快约 2x；默认取模型配置"
+                            "（主力 2 / karaoke 4），显式传值才覆盖）")
     p_sep.add_argument("--tta", action="store_true",
                        help="测试时增强（极性/声道反转平均，三倍耗时，默认关）")
     p_sep.set_defaults(func=_cmd_separate)
@@ -145,8 +146,9 @@ def main(argv=None) -> int:
         # 命令层兜底：traceback 对非专业用户没有意义，落盘后给一句中文 +
         # 日志路径；成功路径的 stdout 与退出码完全不变（失败仍是退出码 1）
         log_exception(f"命令执行失败: {args.command}")
-        print(f"[ERROR] {args.command} 执行失败：{e}")
-        print(f"详细信息已写入日志：{log_path()}")
+        # 日志路径走 log_hint() 而非 log_path()：异常目录布局下 repo_root 会抛
+        # RuntimeError，兜底处理器不该在报错时再崩一次；日志不可用时它返回空串
+        print(f"[ERROR] {args.command} 执行失败：{e}{log_hint()}")
         return 1
 
 
