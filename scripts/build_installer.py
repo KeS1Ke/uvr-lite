@@ -183,18 +183,16 @@ def _prune_torch(dest: Path) -> None:
     print(f"    {dest.name} 裁剪完成（.lib/include/bin 已删）")
 
 
-def _install_torch(bundle_dir: Path, tag: str, indexes: list[str]) -> Path:
-    """把 torch 装到独立目录（--no-deps：依赖已在 python/ 内）。
+def _install_torch(bundle_dir: Path, indexes: list[str]) -> Path:
+    """把 CPU torch 装到独立目录 torch_cpu/（--no-deps：依赖已在 python/ 内）。
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
     见 a7f9dff），再 pip 安装本地 wheel；目录已存在视为已就绪（跨次复用）。
-    半在线单包制只装 torch_cpu（tag 恒为 "cpu"）：CUDA 引擎由安装器/应用按需
-    下载（install.iss 与 uvr_lite.download.install_cuda_torch），不在此处打包。
+    半在线单包制只有 CPU 一条路径：CUDA 引擎由安装器/应用按需下载（install.iss
+    与 uvr_lite.download.install_cuda_torch）。签名里不留 tag 参数——曾有个
+    「tag=cuda」死分支，且 SHA 校验被 `if tag == "cpu":` 包住，等于传错 tag 就
+    静默跳过校验；现在没有可传错的 tag，校验也无条件执行。
     """
-    if tag != "cpu":
-        # 此前这里有 cuda 分支但永不可达（唯一调用点只传 "cpu"）：与其按 tag
-        # 拼出一个名不副实的引擎目录，不如立刻失败
-        raise SystemExit(f"单包制只内置 CPU torch（收到 tag={tag!r}）")
     dest = bundle_dir / "torch_cpu"
     if (dest / "torch" / "__init__.py").exists():
         _prune_torch(dest)  # 复用路径同样裁剪（幂等）
@@ -405,7 +403,7 @@ def prepare_bundle(bundle_dir: Path) -> None:
         print("[3/5] 应用依赖已就绪，复用")
 
     # 4. CPU torch（独立目录，应用内切换）
-    _install_torch(bundle_dir, "cpu", TORCH_CPU_INDEXES)
+    _install_torch(bundle_dir, TORCH_CPU_INDEXES)
 
     # 5. 模型权重（SHA256 校验；已就绪则复用）。本地文件名由注册表的
     #    filename 字段决定（safetensors 或 ckpt），不写死扩展名
