@@ -8,17 +8,13 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 import uvr_lite.log as L
 import uvr_lite.ui.main as M
 from uvr_lite.ui.main import _ONE_LINE_ERR, MainWindow, _short_error
 
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
+# qapp 夹具由 tests/conftest.py 提供（session 级单例，模块内不得再建）
 
 
 @pytest.fixture(autouse=True)

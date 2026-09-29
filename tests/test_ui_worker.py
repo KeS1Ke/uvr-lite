@@ -3,19 +3,11 @@
 import subprocess
 import sys
 
-import pytest
-from PySide6.QtCore import QCoreApplication
-
 from uvr_lite.models import DEFAULT_MODEL
 from uvr_lite.ui.worker import SeparationParams, SeparationWorker
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
-    yield app
-
-
+# qapp 夹具由 tests/conftest.py 提供（session 级单例，模块内不得再建）
 def test_ui_import_does_not_load_torch():
     """UI 启动路径（ui.main → worker）不得加载 torch。
 

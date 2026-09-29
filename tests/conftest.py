@@ -12,6 +12,7 @@
    命中当前工作树，而不是 editable 安装可能指向的另一份 checkout。
 2. autouse fixture：每个用例把 ``uvr_lite.log.repo_root`` 指向 pytest 的
    ``tmp_path``，并在用例前后关句柄 + 清 ``_READY`` 幂等缓存。
+3. session 级 ``qapp`` fixture：整个进程只建一个 QApplication。
 
 与 tests/test_log.py 的关系：该文件自带同款的模块级 autouse fixture（也是
 monkeypatch ``uvr_lite.log.repo_root``）。conftest 的 autouse 先设置、模块内
@@ -74,3 +75,22 @@ def isolated_log_root(tmp_path, monkeypatch):
     _forget_handlers(log)  # 上一条用例残留的 handler 指向旧路径
     yield tmp_path
     _forget_handlers(log)  # 本例的 handler 指向本例 tmp，仍要关掉释放句柄
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """全 suite 共用的 QApplication 单例（UI 测试统一从这里取）。
+
+    Qt 每个进程只允许一个 QApplication/QCoreApplication，且**销毁后不能再建**
+    第二个：原先 4 个 UI 测试模块各写一份 ``scope="module"`` 的 qapp，先建的
+    模块跑完后解释器回收掉单例，下一个模块再建就直接触发 shiboken fastfail
+    （PySide6 6.11.1 实测为进程 0xC0000409，整轮 pytest 无汇总中断，后面的
+    用例一个都不跑）。所以这里建一次、session 结束前一直持有引用。
+
+    返回 QApplication（它本身即 QCoreApplication），只需要信号/事件循环的用例
+    同样可用；各模块不必再自己建。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app

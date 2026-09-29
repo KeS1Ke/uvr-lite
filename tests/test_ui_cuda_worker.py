@@ -1,17 +1,9 @@
 """票 2（tdd）：CudaTorchWorker——进度上报、取消、失败与成功信号。"""
 
-import pytest
-from PySide6.QtCore import QCoreApplication
-
 from uvr_lite.ui.worker import CudaTorchWorker
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
-    yield app
-
-
+# qapp 夹具由 tests/conftest.py 提供（session 级单例，模块内不得再建）
 def test_success_reports_progress_and_finished(monkeypatch, tmp_path, qapp):
     """mock install_cuda_torch 回调进度 → 信号完整；成功时 finished(True, '')。"""
     calls = []

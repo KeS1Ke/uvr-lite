@@ -1,19 +1,12 @@
 """文件列表点击式多选（点一次选中、再点取消）行为测试。"""
 
-import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
 
 from uvr_lite.ui.main import ToggleSelectList
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
+# qapp 夹具由 tests/conftest.py 提供（session 级单例，模块内不得再建）
 def _make_list(names):
     lst = ToggleSelectList()
     lst.addItems(names)
