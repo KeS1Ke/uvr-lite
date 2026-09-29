@@ -60,9 +60,9 @@ GREEN_PY_URLS = [
     f"python-build-standalone/releases/download/{GREEN_PY_TAG}/{GREEN_PY_FILENAME}",
 ]
 
-# torch：只内置 CPU 版（单包制）；CUDA 版由安装器/应用按需下载，源与 SHA
-# 统一维护在 uvr_lite/download.py（TORCH_CUDA_URLS / TORCH_CUDA_SHA256），
-# install.iss 内硬编码同款（_check_cuda_sha_consistency 防漂移）。
+# torch：只内置 CPU 版（单包制）；CUDA 版由安装器/应用按需下载，源 / SHA /
+# 字节数统一维护在 uvr_lite/download.py（TORCH_CUDA_URLS / _SHA256 / _SIZE），
+# install.iss 内硬编码同款（build 前 _check_packaging_consistency 逐项核对防漂移）。
 # 镜像按实测速度排序（2026-08-04 流式测速）：
 #   SJTU 15-17MB/s > 官方 13-14MB/s > 阿里云 3-4MB/s（需浏览器 UA，403 已修）。
 # 南大 mirror.nju.edu.cn 无 pytorch-wheels（404），未收录。
@@ -90,6 +90,11 @@ DEPENDENCIES = [
     "PySide6-Essentials>=6.6",
 ]
 
+# 不随 DEPENDENCIES 批量装的两项：torch 由 _install_torch 装到独立目录（应用内
+# 切换 CPU/CUDA）；rotary-embedding-torch 的依赖链会把 CPU torch（约 524MB）
+# 拖进 site-packages，故在 prepare_bundle 里单独 --no-deps 安装
+DEPS_INSTALLED_SEPARATELY = {"torch", "rotary-embedding-torch"}
+
 
 # ---------- 工具 ----------
 
@@ -107,11 +112,6 @@ def _download_to(urls: list[str], dest: Path,
     from uvr_lite import download as dl
 
     dl._download(urls, dest, progress_cb)
-
-
-def _run(cmd: list[str], desc: str) -> None:
-    print(f"  → {desc}")
-    subprocess.run(cmd, check=True)
 
 
 # ---------- bundle 准备 ----------
@@ -173,23 +173,13 @@ def _pip(python_exe: Path, specs: list[str], index: str = PIP_INDEX,
 def _prune_torch(dest: Path) -> None:
     """裁剪 torch 安装目录：删编译期文件（.lib / include / bin），运行时不需要。
 
-    实测收益：torch_cuda 5.6G→4.7G（-900M）、torch_cpu 1.4G→461M（-940M），
-    import + 真实分离（CPU/GPU）验证无损。bin/ 保留 torch_shm_manager.exe
-    （torch 多进程共享内存需要；本应用单进程推理实际用不到，保守保留）。
+    清单与实现只在 uvr_lite.download._prune_torch_install 维护一份——打包链与
+    应用内 install_cuda_torch 走同一段代码，避免两处漂移（实测收益见该函数）；
+    install.iss 的 Pascal 版无法复用实现，由 _check_prune_list 文本核对防漂移。
     """
-    t = dest / "torch"
-    for f in (t / "lib").glob("*.lib"):
-        f.unlink()
-    shutil.rmtree(t / "include", ignore_errors=True)
-    bin_dir = t / "bin"
-    if bin_dir.is_dir():
-        for f in bin_dir.iterdir():
-            if f.name == "torch_shm_manager.exe":
-                continue
-            if f.is_file():
-                f.unlink()
-            else:
-                shutil.rmtree(f, ignore_errors=True)
+    from uvr_lite import download as dl
+
+    dl._prune_torch_install(dest)
     print(f"    {dest.name} 裁剪完成（.lib/include/bin 已删）")
 
 
@@ -198,41 +188,41 @@ def _install_torch(bundle_dir: Path, tag: str, indexes: list[str]) -> Path:
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
     见 a7f9dff），再 pip 安装本地 wheel；目录已存在视为已就绪（跨次复用）。
-    单包制只装 torch_cpu；CUDA 引擎由安装器/应用按需下载（install.iss 与
-    uvr_lite.download.install_cuda_torch）。
+    半在线单包制只装 torch_cpu（tag 恒为 "cpu"）：CUDA 引擎由安装器/应用按需
+    下载（install.iss 与 uvr_lite.download.install_cuda_torch），不在此处打包。
     """
-    dest = bundle_dir / f"torch_{tag}"
+    if tag != "cpu":
+        # 此前这里有 cuda 分支但永不可达（唯一调用点只传 "cpu"）：与其按 tag
+        # 拼出一个名不副实的引擎目录，不如立刻失败
+        raise SystemExit(f"单包制只内置 CPU torch（收到 tag={tag!r}）")
+    dest = bundle_dir / "torch_cpu"
     if (dest / "torch" / "__init__.py").exists():
         _prune_torch(dest)  # 复用路径同样裁剪（幂等）
-        print(f"[4/5] torch_{tag} 已就绪，复用")
+        print("[4/5] torch_cpu 已就绪，复用")
         return dest
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
 
-    # 绿色 Python 固定 3.12 → cp312 wheel（见 GREEN_PY_VERSION）；
-    # 构建标签：CPU 为 +cpu（CUDA 为 +cu128，见 download.py）
+    # 绿色 Python 固定 3.12 → cp312 wheel（见 GREEN_PY_VERSION）
     cp_tag = f"cp{GREEN_PY_VERSION.split('.')[0]}{GREEN_PY_VERSION.split('.')[1]}"
-    wheel_tag = "cpu" if tag == "cpu" else "cu128"
-    wheel_name = f"torch-{TORCH_VERSION}+{wheel_tag}-{cp_tag}-{cp_tag}-win_amd64.whl"
+    wheel_name = f"torch-{TORCH_VERSION}+cpu-{cp_tag}-{cp_tag}-win_amd64.whl"
     wheel_path = bundle_dir / wheel_name
-    print(f"[4/5] 下载 torch_{tag}（{wheel_name}，"
-          f"约 {3300 if tag == 'cuda' else 700}MB，多段并行 + 镜像回退）…")
+    print(f"[4/5] 下载 torch_cpu（{wheel_name}，约 700MB，多段并行 + 镜像回退）…")
     from uvr_lite import download as dl
 
     # URL 中 "+" 必须 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403
     # （此前官方回退源一直是坏的）；SJTU/阿里云对两种形式均可（已验证）。
     dl._download([f"{idx}/{wheel_name.replace('+', '%2B')}" for idx in indexes],
                  wheel_path)
-    if tag == "cpu":
-        actual = sha256_of(wheel_path)
-        if actual != TORCH_CPU_SHA256:
-            wheel_path.unlink(missing_ok=True)
-            raise SystemExit(
-                f"CPU torch wheel 校验失败: 期望 {TORCH_CPU_SHA256[:16]}…，"
-                f"实际 {actual[:16]}…。下载源可能已变更，请核实镜像内容。")
-        print("    CPU wheel SHA256 校验通过")
-    print(f"[4/5] 安装 torch_{tag} 到 {dest}…")
+    actual = sha256_of(wheel_path)
+    if actual != TORCH_CPU_SHA256:
+        wheel_path.unlink(missing_ok=True)
+        raise SystemExit(
+            f"CPU torch wheel 校验失败: 期望 {TORCH_CPU_SHA256[:16]}…，"
+            f"实际 {actual[:16]}…。下载源可能已变更，请核实镜像内容。")
+    print("    CPU wheel SHA256 校验通过")
+    print(f"[4/5] 安装 torch_cpu 到 {dest}…")
     # 依赖 nvidia-* 用默认清华源拉取（index="" 会走 pypi.org 官方源卡死）
     _pip(bundle_dir / "python" / "python.exe", [str(wheel_path)],
          target=dest)
@@ -284,15 +274,94 @@ def _smoke_ui(python_exe: Path) -> None:
     subprocess.run([str(python_exe), "-c", code], check=True, env=env)
 
 
-def _check_cuda_sha_consistency() -> None:
-    """install.iss 与 uvr_lite/download.py 的 CUDA wheel SHA 应一致（防漂移）。"""
+# ---------- 打包链一致性校验 ----------
+# install.iss 是 Pascal（Inno 脚本环境），无法 import Python 侧的常量与实现，
+# 只能硬编码同款。漂移的代价：勾选 CUDA 引擎时下载/解压的可能是另一个文件
+# （安装期 SHA 校验才失败，3.3GB 白下）、裁剪清单漏项白占约 900MB、装机依赖
+# 漏包则应用启动即失败。故打包前文本核对，把漂移变成硬错误。
+
+def _grab(iss: str, pattern: str, what: str) -> str:
+    """从 install.iss 取一处硬编码值；取不到即报错（宁可停下也不跳过校验）。"""
+    m = re.search(pattern, iss)
+    if not m:
+        raise SystemExit(f"install.iss 中找不到 {what}，打包链一致性校验无法完成")
+    return m.group(1)
+
+
+def _check_cuda_assets() -> None:
+    """install.iss 与 download.py 的 CUDA 资产（文件名/SHA/字节数/镜像）必须一致。"""
+    from uvr_lite import download as dl
+
     iss = (ROOT / "installer" / "install.iss").read_text(encoding="utf-8")
-    dl_src = (ROOT / "uvr_lite" / "download.py").read_text(encoding="utf-8")
-    m_iss = re.search(r"CUDA_SHA = '([0-9a-f]{64})'", iss)
-    m_dl = re.search(r'TORCH_CUDA_SHA256 = "([0-9a-f]{64})"', dl_src)
-    if not m_iss or not m_dl or m_iss.group(1) != m_dl.group(1):
+    # wheel 本质是 zip，install.iss 里按 .zip 处理（extractarchive 靠扩展名识别）
+    wheel_zip = dl.TORCH_CUDA_WHEEL.removesuffix(".whl") + ".zip"
+    names = {
+        "CUDA_WHEEL 常量": _grab(iss, r"CUDA_WHEEL = '([^']+)'", "CUDA_WHEEL"),
+        "[Files] 解压源": _grab(iss, r'Source: "\{tmp\}\\([^"]+)"', "[Files] Source"),
+    }
+    for what, name in names.items():
+        if name != wheel_zip:
+            raise SystemExit(f"{what} 与 download.py TORCH_CUDA_WHEEL 不一致: "
+                             f"{name} != {wheel_zip}")
+    size = int(_grab(iss, r"ExternalSize: (\d+)", "ExternalSize"))
+    if size != dl.TORCH_CUDA_SIZE:
+        raise SystemExit(f"ExternalSize 与 download.py TORCH_CUDA_SIZE 不一致: "
+                         f"{size} != {dl.TORCH_CUDA_SIZE}")
+    sha = _grab(iss, r"CUDA_SHA = '([0-9a-f]{64})'", "CUDA_SHA")
+    if sha != dl.TORCH_CUDA_SHA256:
         raise SystemExit("CUDA wheel SHA 不一致：install.iss 与 download.py 需同步修改")
-    print(f"  CUDA wheel SHA 一致: {m_dl.group(1)[:16]}…")
+    url = _grab(iss, r"CUDA_URL = '([^']+)'", "CUDA_URL")
+    if url != dl.TORCH_CUDA_URLS[0]:
+        raise SystemExit("install.iss CUDA_URL 与 download.py 首个镜像不一致:\n"
+                         f"  iss: {url}\n  dl : {dl.TORCH_CUDA_URLS[0]}")
+    print(f"  CUDA 资产一致: {wheel_zip} / {size} 字节 / SHA {sha[:16]}…")
+
+
+def _check_prune_list() -> None:
+    """install.iss 的 Pascal 裁剪必须覆盖 download._prune_torch_install 的清单。
+
+    Pascal 版在 Inno 脚本环境里跑，无法复用 Python 实现（这是它必须重复的
+    原因）；清单唯一来源是 uvr_lite/download.py，这里核对标记词防两边漂移。
+    """
+    iss = (ROOT / "installer" / "install.iss").read_text(encoding="utf-8")
+    required = {
+        "'*.lib'": "torch/lib 编译期导入库",
+        "T + 'include'": "torch/include 头文件目录",
+        "T + 'bin'": "torch/bin 可执行文件",
+        "'torch_shm_manager.exe'": "bin 内必须保留的 shm 管理器",
+    }
+    missing = [why for token, why in required.items() if token not in iss]
+    if missing:
+        raise SystemExit("install.iss 的 PruneTorchCuda 缺少裁剪项: " + "、".join(missing)
+                         + "（唯一来源: uvr_lite/download.py _prune_torch_install）")
+    print("  torch 裁剪清单一致: " + "、".join(required.values()))
+
+
+def _pkg_name(spec: str) -> str:
+    """依赖声明 → 归一化包名（PEP 503：小写 + 连字符，去掉版本/extra 约束）。"""
+    return re.split(r"[<>=!~\[; (]", spec.strip(), maxsplit=1)[0].lower().replace("_", "-")
+
+
+def _check_dependency_list() -> None:
+    """pyproject.toml 的运行依赖必须都进 DEPENDENCIES（装机漏包 = 启动即失败）。"""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r"^dependencies = \[(.*?)^\]", text, re.S | re.M)
+    if not m:
+        raise SystemExit("pyproject.toml 未找到 [project].dependencies，依赖校验无法完成")
+    want = {_pkg_name(s) for s in re.findall(r'"([^"]+)"', m.group(1))}
+    have = {_pkg_name(s) for s in DEPENDENCIES}
+    missing = want - have - DEPS_INSTALLED_SEPARATELY
+    if missing:
+        raise SystemExit(f"DEPENDENCIES 缺少 pyproject 运行依赖: {sorted(missing)}"
+                         "（安装包里会缺包，应用启动即失败）")
+    print(f"  依赖清单一致: pyproject 的 {len(want)} 项运行依赖均已覆盖安装包")
+
+
+def _check_packaging_consistency() -> None:
+    """打包前校验三处跨文件/跨语言的同款事实，漂移即硬失败。"""
+    _check_cuda_assets()
+    _check_prune_list()
+    _check_dependency_list()
 
 
 def prepare_bundle(bundle_dir: Path) -> None:
@@ -374,7 +443,7 @@ def build(iscc: Path, out_dir: Path) -> Path:
     # （相对脚本文件所在目录），避免 ISCC 对含空格路径参数的解析问题；
     # 只传无空格的版本号。半在线单包约 283MB（Inno 6+ 支持 >2GB 安装包）。
     out_dir.mkdir(parents=True, exist_ok=True)
-    _check_cuda_sha_consistency()
+    _check_packaging_consistency()
     cmd = [
         str(iscc),
         f"/DMyAppVersion={__version__}",

@@ -143,8 +143,11 @@ function MoveFileEx(lpExistingFileName: string; lpNewFileName: string; dwFlags: 
   external 'MoveFileExW@kernel32.dll stdcall';
 
 // ---------- 裁剪 CUDA torch（.lib / include / bin，运行时不需要） ----------
-// 与打包脚本 build_installer._prune_torch 同款逻辑（Pascal 版）；实测
-// torch_cuda 5.6G→4.7G（-900M）。bin/ 保留 torch_shm_manager.exe。
+// 裁剪清单的唯一来源是 uvr_lite/download.py 的 _prune_torch_install（打包脚本
+// build_installer._prune_torch 直接调它）；本 Pascal 版在 Inno 脚本环境里跑，
+// 无法 import Python 实现，只能硬编码同款——改动任一侧都必须同步另一侧，
+// 打包前由 build_installer._check_prune_list 的标记词核对拦截漂移。
+// 实测 torch_cuda 5.6G→4.7G（-900M）。bin/ 保留 torch_shm_manager.exe。
 
 procedure DelTree(const Dir: String);
 var

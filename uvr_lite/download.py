@@ -417,9 +417,12 @@ def download_all() -> None:
 # cudnn/cublas/cufft DLL，无独立 nvidia-* 包，解压即用）。
 # 镜像按实测速度排序（2026-08-04）：SJTU 15-17MB/s > 官方 13-14MB/s >
 # 阿里云 3-4MB/s（需浏览器 UA，403 已修）；南大无 pytorch-wheels（404）。
-# SHA256 于打包时下载一次算得（2bb8c05d…，3273024349 字节）。
+# SHA256 与字节数于打包时下载一次算得；install.iss 的 CUDA_SHA / ExternalSize
+# 硬编码同款，由 scripts/build_installer 打包前的一致性校验逐项核对防漂移。
 TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
 TORCH_CUDA_SHA256 = "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30"
+# wheel 字节数（install.iss [Files] ExternalSize 的权威来源；本模块不读它）
+TORCH_CUDA_SIZE = 3273024349
 # URL 中 "+" 用 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403，此前
 # 官方回退源一直是坏的；SJTU/阿里云对两种形式均可（与 install.iss 一致）。
 TORCH_CUDA_WHEEL_ENC = TORCH_CUDA_WHEEL.replace("+", "%2B")
@@ -446,8 +449,12 @@ def cuda_torch_installed(base: Path | None = None) -> bool:
 def _prune_torch_install(dest: Path) -> None:
     """裁剪 torch 目录：删编译期 .lib / include / bin（运行时不需要）。
 
-    与打包脚本 build_installer._prune_torch 同款；实测 torch_cuda
-    5.6G→4.7G（-900M），import + 真实分离（CPU/GPU）验证无损。
+    裁剪清单的**唯一来源**：打包脚本 build_installer._prune_torch 直接调用本
+    函数（此前两份实现同款重复）；install.iss 的 Pascal 版在 Inno 脚本环境里
+    跑，无法复用 Python 实现，只能硬编码同款，由 build_installer 打包前
+    文本核对防漂移（_check_prune_list）。
+    实测收益：torch_cuda 5.6G→4.7G（-900M）、torch_cpu 1.4G→461M（-940M），
+    import + 真实分离（CPU/GPU）验证无损。
     bin/ 保留 torch_shm_manager.exe（torch 多进程共享内存需要）。
     """
     t = dest / "torch"
