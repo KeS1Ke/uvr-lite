@@ -6,8 +6,6 @@ RuntimeError（uvr_lite/__init__.py 的 ``_base_dir``）。错误分支若直接
 用户看到的是原始 traceback——正好违背该分支的存在理由。这里锁住这条路径。
 """
 
-from pathlib import Path
-
 import uvr_lite.log as L
 from uvr_lite.cli import main
 
@@ -47,12 +45,16 @@ def test_error_path_prints_log_path(monkeypatch, capsys, tmp_path):
     assert f"详细信息已写入日志：{tmp_path / 'logs' / 'uvr-lite.log'}" in out
 
 
-def test_success_path_unchanged(monkeypatch, capsys):
-    """成功路径不因本修复改变：退出码 0、不打印 [ERROR]。"""
-    monkeypatch.setattr("uvr_lite.cli.model_file", lambda name: Path("/nonexistent") / name)
+def test_success_path_unchanged(monkeypatch, capsys, tmp_path):
+    """成功路径不因本修复改变：退出码 0、不打印 [ERROR]、也不碰真实模型目录。"""
+    # 模型目录重定向到 tmp（与 tests/test_cli_models.py 同款）：models 命令会经
+    # retired_model_files→models_dir() 解析到仓库根 models/（mkdir + 读出真实退役
+    # 权重），不隔离的话用例既污染工作区、结果又依赖本机是否留旧权重
+    monkeypatch.setenv("UVR_MODEL_DIR", str(tmp_path))
 
     assert main(["models"]) == 0
 
     out = capsys.readouterr().out
     assert "[ERROR]" not in out
-    assert "未下载" in out  # 正常的列表输出照旧
+    assert "未下载" in out, "正常的列表输出照旧（tmp 里没有权重）"
+    assert "可回收" not in out, "tmp 里没有退役权重，不该出现可回收行"
