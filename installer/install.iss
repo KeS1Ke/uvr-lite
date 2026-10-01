@@ -94,8 +94,9 @@ Filename: "{app}\python\pythonw.exe"; Parameters: "-m uvr_lite.ui --model-dir ""
 // ---------- CUDA 引擎下载（半在线） ----------
 // wheel 自包含全部 CUDA 运行库（torch/lib 内 cudnn/cublas/cufft DLL，无独立
 // nvidia-* 包），SHA256 与 uvr_lite/download.py 的 TORCH_CUDA_SHA256 一致。
-// 镜像按实测速度排序（2026-08-04）：SJTU 15-17MB/s > 官方 13-14MB/s >
-// 阿里云 3-4MB/s（需浏览器 UA）。单 URL 无镜像回退——下载失败仅影响 CUDA
+// 镜像按实测速度排序（2026-09-29 复测，8 并发聚合）：官方 4.4MB/s >
+// SJTU 2.0MB/s > 阿里云 0.17MB/s（旧基线 2026-08-04 为 SJTU 15-17 > 官方
+// 13-14 > 阿里云 3-4，已反转）。单 URL 无镜像回退——下载失败仅影响 CUDA
 // 引擎，可在应用内补装（多源回退 + 断点续传）。
 const
   // 下载后改名 .zip：wheel 本质是 zip，但 extractarchive 按扩展名识别格式，
@@ -103,7 +104,7 @@ const
   // （已实测）；内容不变，仅扩展名不同。
   CUDA_WHEEL = 'torch-2.7.1+cu128-cp312-cp312-win_amd64.zip';
   CUDA_SHA = '2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30';
-  CUDA_URL = 'https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl';
+  CUDA_URL = 'https://download.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl';
 
 var
   ProgressPage: TOutputProgressWizardPage;

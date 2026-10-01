@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-![version](https://img.shields.io/badge/version-0.1.3-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.6-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -49,6 +49,7 @@ uvr-lite separate 歌曲.flac -o output
 小贴士：
 
 - **推理引擎**：界面里可选 **自动 / CPU / CUDA**（自动模式：有独立显卡用 CUDA 引擎，否则 CPU 版）；切换后重启 uvr-lite 生效
+- **最小化到系统托盘**（可选，默认关闭）：勾选后，最小化会收到通知区域，而不是留在任务栏。点窗口关闭仍然退出。托盘菜单可以重新显示主窗口，或退出程序。
 - **暂时没有独立显卡？** 界面「**推理引擎**」区有「**下载 CUDA 引擎**」按钮（断点续传 + 多镜像回退），或在命令行运行 `uvr-lite install-cuda`——想什么时候装都行，无需重装
 - **升级**：重新运行安装程序即可——原地覆盖更新，保留你的设置
 - **卸载**：控制面板 → 程序和功能 → uvr-lite（或运行安装目录下的 `Uninstall.exe`）——删除快捷方式、注册表与安装目录

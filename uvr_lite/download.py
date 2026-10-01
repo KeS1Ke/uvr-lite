@@ -415,8 +415,12 @@ def download_all() -> None:
 # 单包安装只含 CPU torch；CUDA 引擎由用户应用内/CLI 额外下载（半在线模式，
 # 与 UVR 官方同策略）。wheel 自包含全部 CUDA 运行库（torch/lib 内 16 个
 # cudnn/cublas/cufft DLL，无独立 nvidia-* 包，解压即用）。
-# 镜像按实测速度排序（2026-08-04）：SJTU 15-17MB/s > 官方 13-14MB/s >
-# 阿里云 3-4MB/s（需浏览器 UA，403 已修）；南大无 pytorch-wheels（404）。
+# 镜像按实测速度排序（2026-09-29 复测：3.27GB wheel，8 并发聚合 / 单连接）：
+#   官方 4.4 / 2.19MB/s > SJTU 2.0 / 2.02MB/s > 阿里云 0.17 / 0.02MB/s。
+# 2026-08-04 旧基线为 SJTU 15-17 > 官方 13-14 > 阿里云 3-4，已反转。
+# 回退只在「失败」时触发，慢但可用的源不会被跳过，所以最快的必须排首位。
+# 阿里云实测已近不可用（0.17MB/s ≈ 320 分钟，且样点会超时），仅作末位兜底。
+# 南大无 pytorch-wheels（404）。
 # SHA256 与字节数于打包时下载一次算得；install.iss 的 CUDA_SHA / ExternalSize
 # 硬编码同款，由 scripts/build_installer 打包前的一致性校验逐项核对防漂移。
 TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
@@ -427,8 +431,8 @@ TORCH_CUDA_SIZE = 3273024349
 # 官方回退源一直是坏的；SJTU/阿里云对两种形式均可（与 install.iss 一致）。
 TORCH_CUDA_WHEEL_ENC = TORCH_CUDA_WHEEL.replace("+", "%2B")
 TORCH_CUDA_URLS = [
-    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
     f"https://download.pytorch.org/whl/cu128/{TORCH_CUDA_WHEEL_ENC}",
+    f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
     f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
 ]
 

@@ -63,8 +63,11 @@ GREEN_PY_URLS = [
 # torch：只内置 CPU 版（单包制）；CUDA 版由安装器/应用按需下载，源 / SHA /
 # 字节数统一维护在 uvr_lite/download.py（TORCH_CUDA_URLS / _SHA256 / _SIZE），
 # install.iss 内硬编码同款（build 前 _check_packaging_consistency 逐项核对防漂移）。
-# 镜像按实测速度排序（2026-08-04 流式测速）：
-#   SJTU 15-17MB/s > 官方 13-14MB/s > 阿里云 3-4MB/s（需浏览器 UA，403 已修）。
+# 镜像排序：CPU wheel 索引沿用 2026-08-04 流式测速基线（SJTU 15-17MB/s >
+# 官方 13-14MB/s > 阿里云 3-4MB/s，需浏览器 UA，403 已修）；CUDA wheel 于
+# 2026-09-29 复测后反转为「官方 > SJTU > 阿里云」（见
+# uvr_lite/download.py TORCH_CUDA_URLS 注释），install.iss 的 CUDA_URL 随其
+# 首个镜像同步，_check_cuda_assets 会硬失败拦漂移。
 # 南大 mirror.nju.edu.cn 无 pytorch-wheels（404），未收录。
 TORCH_VERSION = "2.7.1"
 # CPU wheel 内容哈希：构建期校验（此前仅 CUDA 有 SHA，CPU 无校验直接 pip
@@ -184,7 +187,13 @@ def _prune_torch(dest: Path) -> None:
 
 
 def _install_torch(bundle_dir: Path, indexes: list[str]) -> Path:
-    """把 CPU torch 装到独立目录 torch_cpu/（--no-deps：依赖已在 python/ 内）。
+    """把 CPU torch 连同其纯 Python 依赖装到独立目录 torch_cpu/。
+
+    不要加 --no-deps。依赖并不在绿色 Python 里：sympy、networkx、filelock、
+    fsspec、jinja2、mpmath、markupsafe 会落到 torch_cpu/。CUDA 引擎只解压
+    wheel，运行时靠 uvr_lite 在选用 torch_cuda 时把 torch_cpu 留在 sys.path
+    后面才能 import 到这些包。改成 --no-deps 又不另装依赖，分离会在
+    import sympy 处失败。
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
     见 a7f9dff），再 pip 安装本地 wheel；目录已存在视为已就绪（跨次复用）。

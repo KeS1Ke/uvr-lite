@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThread, QUrl
+from PySide6.QtCore import QEvent, QSettings, Qt, QThread, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,10 +29,13 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +46,7 @@ from ..log import ensure_log_dir, get_logger, log_exception, log_hint, log_path
 from ..models import MODEL_REGISTRY
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import PHASE_CN, estimate_eta, summary_text
+from .theme import apply as apply_theme
 from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationParams, SeparationWorker
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
@@ -90,6 +94,25 @@ def _short_error(error: str) -> str:
     return text if len(text) <= _ONE_LINE_ERR else text[:_ONE_LINE_ERR] + "…"
 
 
+def _settings_flag(value: object, default: bool = False) -> bool:
+    """QSettings 的布尔在 ini/注册表里经常读回 'true'/'false' 字符串。
+
+    直接 bool('false') 会得到 True，勾选会被记反。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return default
+
+
 class ToggleSelectList(QListWidget):
     """点击式多选：点一次选中、再点取消，各文件互不影响（无需 Ctrl）。"""
 
@@ -113,11 +136,13 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.settings = QSettings("uvr-lite", "uvr-lite")
         self._paths: list[Path] = []
+        self._tray: QSystemTrayIcon | None = None
+        self._tray_menu: QMenu | None = None
         # 版本号放标题：界面里没有别的出口（cli --version 用户看不到），标题截图即报障信息
         self.setWindowTitle(f"uvr-lite 人声/伴奏分离 {__version__}")
         self.setWindowIcon(QIcon(str(_ICON)))
         self.setAcceptDrops(True)
-        self.resize(640, 620)
+        self.resize(760, 680)
         self._build_ui()
         self._restore_settings()
 
@@ -125,14 +150,14 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget(self)
+        central.setObjectName("root")
         root = QVBoxLayout(central)
+        root.setContentsMargins(16, 14, 16, 10)
+        root.setSpacing(8)
 
         # --- 模型状态提示条（缺失时显示，可一键下载）---
         self.banner = QFrame(central)
         self.banner.setObjectName("banner")
-        self.banner.setStyleSheet(
-            "QFrame#banner { background: #FFF8DC; border: 1px solid #E6C300; border-radius: 4px; }"
-        )
         banner_row = QHBoxLayout(self.banner)
         banner_row.setContentsMargins(8, 6, 8, 6)
         self.label_banner = QLabel(self.banner)
@@ -148,15 +173,25 @@ class MainWindow(QMainWindow):
         self.btn_download.clicked.connect(self._start_download)
 
         # --- 文件列表 ---
-        file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
-        fl = QVBoxLayout(file_box)
-        self.list_files = ToggleSelectList(file_box)
-        fl.addWidget(self.list_files)
+        self.file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
+        self.file_box.setObjectName("files")
+        fl = QVBoxLayout(self.file_box)
+        fl.setContentsMargins(12, 8, 12, 10)
+        fl.setSpacing(8)
+        self.file_stack = QStackedWidget(self.file_box)
+        self.file_stack.setMinimumHeight(112)
+        self.drop_hint = QLabel("把音频拖到这里\n或用下面的按钮添加", self.file_stack)
+        self.drop_hint.setObjectName("dropHint")
+        self.drop_hint.setAlignment(Qt.AlignCenter)
+        self.list_files = ToggleSelectList(self.file_stack)
+        self.file_stack.addWidget(self.drop_hint)
+        self.file_stack.addWidget(self.list_files)
+        fl.addWidget(self.file_stack, 1)
         btn_row = QHBoxLayout()
-        self.btn_add_files = QPushButton("选择文件…", file_box)
-        self.btn_add_folder = QPushButton("选择文件夹…", file_box)
-        self.btn_remove = QPushButton("移除所选", file_box)
-        self.btn_clear = QPushButton("清空", file_box)
+        self.btn_add_files = QPushButton("选择文件…", self.file_box)
+        self.btn_add_folder = QPushButton("选择文件夹…", self.file_box)
+        self.btn_remove = QPushButton("移除所选", self.file_box)
+        self.btn_clear = QPushButton("清空", self.file_box)
         for b in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
             btn_row.addWidget(b)
         btn_row.addStretch(1)
@@ -165,11 +200,15 @@ class MainWindow(QMainWindow):
         self.btn_add_folder.clicked.connect(self._add_folder_dialog)
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear_list)
-        root.addWidget(file_box)
+        root.addWidget(self.file_box, 1)
 
         # --- 模型与参数 ---
         param_box = QGroupBox("参数", central)
         form = QFormLayout(param_box)
+        form.setContentsMargins(12, 8, 12, 10)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(6)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.combo_model = QComboBox(param_box)
         for name in MODEL_REGISTRY:
             self.combo_model.addItem(MODEL_LABELS.get(name, name), name)
@@ -202,6 +241,7 @@ class MainWindow(QMainWindow):
         # --- 推理引擎（CPU/CUDA torch）：单包只含 CPU，CUDA 可选下载 ---
         engine_box = QGroupBox("推理引擎", central)
         engine_row = QHBoxLayout(engine_box)
+        engine_row.setContentsMargins(12, 8, 12, 10)
         self.label_engine = QLabel(engine_box)
         self.cuda_progress = QProgressBar(engine_box)
         self.cuda_progress.setFixedWidth(180)
@@ -218,6 +258,7 @@ class MainWindow(QMainWindow):
         # --- 输出目录 ---
         out_box = QGroupBox("输出文件夹", central)
         out_row = QHBoxLayout(out_box)
+        out_row.setContentsMargins(12, 8, 12, 10)
         self.edit_out = QLineEdit(out_box)
         self.edit_out.setPlaceholderText("未选择（默认：当前目录/output）")
         self.btn_out = QPushButton("选择…", out_box)
@@ -229,11 +270,15 @@ class MainWindow(QMainWindow):
         # --- 操作区 ---
         action_row = QHBoxLayout()
         self.btn_start = QPushButton("开始分离", central)
+        self.btn_start.setObjectName("primary")
         self.btn_cancel = QPushButton("取消", central)
+        self.btn_cancel.setObjectName("quiet")
         self.btn_cancel.setEnabled(False)
         action_row.addWidget(self.btn_start)
         action_row.addWidget(self.btn_cancel)
         action_row.addStretch(1)
+        self.check_minimize_tray = QCheckBox("最小化到系统托盘", central)
+        action_row.addWidget(self.check_minimize_tray)
         root.addLayout(action_row)
         self.btn_start.clicked.connect(self._start_clicked)
         self.btn_cancel.clicked.connect(self._cancel_clicked)
@@ -243,9 +288,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.progress)
 
         self.label_status = QLabel("就绪。添加音频文件后即可开始。", central)
+        self.label_status.setObjectName("status")
         # 「查看日志」：模型下载/CUDA 安装失败只有一行标签写得下，完整原因在日志里，
         # 这里给个固定入口（放在底部状态行，任何失败场景都够得着）
         self.btn_open_log = QPushButton("查看日志", central)
+        self.btn_open_log.setObjectName("quiet")
         # 绝对路径不进单行标签（会把「推理引擎」那行撑坏），只放 tooltip：
         # 悬停即可知道日志文件在哪，看不见的屏幕阅读器也有无障碍描述
         tip = "打开日志所在的文件夹，把里面的 uvr-lite.log 发给支持的人就能定位问题。"
@@ -265,6 +312,7 @@ class MainWindow(QMainWindow):
         # 控件全部就绪后再挂模型状态联动
         self.combo_model.currentIndexChanged.connect(self._refresh_model_banner)
         self._refresh_model_banner()
+        self._setup_tray()
 
     # ---------- 文件列表操作 ----------
 
@@ -281,6 +329,8 @@ class MainWindow(QMainWindow):
         for p in self._paths:
             item = QListWidgetItem(p.name, self.list_files)
             item.setData(Qt.UserRole, str(p))
+        self.file_stack.setCurrentWidget(
+            self.list_files if self._paths else self.drop_hint)
 
     def _set_item_state(self, path: Path, prefix: str, note: str = "") -> None:
         """更新列表中某文件的显示：prefix 为 ⏳/✓/✗，note 追加说明。"""
@@ -331,12 +381,23 @@ class MainWindow(QMainWindow):
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
+            self._set_drop_target(True)
             event.acceptProposedAction()
 
+    def dragLeaveEvent(self, event) -> None:
+        self._set_drop_target(False)
+        event.accept()
+
     def dropEvent(self, event) -> None:
+        self._set_drop_target(False)
         dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls()]
         files = [p for p in dropped if p.is_file() and is_audio(p)]
         self._add_paths(files)
+
+    def _set_drop_target(self, active: bool) -> None:
+        self.file_box.setProperty("dragging", "true" if active else "false")
+        self.file_box.style().unpolish(self.file_box)
+        self.file_box.style().polish(self.file_box)
 
     # ---------- 参数记忆 ----------
 
@@ -350,6 +411,8 @@ class MainWindow(QMainWindow):
         self.spin_batch.setValue(int(s.value("batch_size", 0)))
         self.spin_overlap.setValue(int(s.value("num_overlap", 0)))
         self.check_tta.setChecked(bool(s.value("tta", False)))
+        self.check_minimize_tray.setChecked(
+            _settings_flag(s.value("minimize_to_tray", False)))
         out = s.value("out_dir", "")
         if out:
             self.edit_out.setText(str(out))
@@ -364,6 +427,7 @@ class MainWindow(QMainWindow):
         s.setValue("batch_size", self.spin_batch.value())
         s.setValue("num_overlap", self.spin_overlap.value())
         s.setValue("tta", self.check_tta.isChecked())
+        s.setValue("minimize_to_tray", self.check_minimize_tray.isChecked())
         s.setValue("out_dir", self.edit_out.text())
 
     @staticmethod
@@ -690,9 +754,74 @@ class MainWindow(QMainWindow):
             "暂时打不开日志所在的文件夹（可能是安装目录不能写入）。"
             "如果问题一直出现，把这段提示截图发给支持的人就行。")
 
+    # ---------- 最小化到托盘 ----------
+
+    def _setup_tray(self) -> None:
+        """托盘图标不常驻：只有最小化且勾选时才出现。系统没有托盘则禁用勾选。"""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.check_minimize_tray.setEnabled(False)
+            return
+        tray = QSystemTrayIcon(QIcon(str(_ICON)), self)
+        tray.setToolTip("uvr-lite 正在后台运行")
+        # setContextMenu 不接管所有权，菜单必须挂住，否则右键是空的
+        menu = QMenu(self)
+        act_show = menu.addAction("显示主窗口")
+        act_quit = menu.addAction("退出")
+        act_show.triggered.connect(self._restore_from_tray)
+        # 窗口已经隐藏，关掉它不是最后一个可见窗口，quitOnLastWindowClosed 不会结束事件循环。
+        act_quit.triggered.connect(self._quit_from_tray)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        self._tray = tray
+        self._tray_menu = menu
+
+    def _on_tray_activated(self, reason) -> None:
+        # Windows 左键是 Trigger，双击才是 DoubleClick。两种都回到主窗口。
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._restore_from_tray()
+
+    def _should_minimize_to_tray(self) -> bool:
+        if self._tray is None or not QSystemTrayIcon.isSystemTrayAvailable():
+            return False
+        return self.check_minimize_tray.isChecked()
+
+    def _hide_to_tray(self) -> None:
+        # hide 而不是 close：分离线程和事件循环继续跑；真正退出仍走 closeEvent。
+        # 未勾选或系统没有托盘时什么都不做，最小化仍留在任务栏。
+        if not self._should_minimize_to_tray():
+            return
+        self._tray.show()
+        self.hide()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.raise_()
+        self.activateWindow()
+        if self._tray is not None:
+            self._tray.hide()
+
+    def _quit_from_tray(self) -> None:
+        self.close()
+        QApplication.quit()
+
     # ---------- 生命周期 ----------
 
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if not (self.isMinimized() and self._should_minimize_to_tray()):
+            return
+        # changeEvent 里直接 hide() 会把最小化状态机弄乱，等这一轮事件结束再藏
+        QTimer.singleShot(0, self._hide_to_tray)
+
     def closeEvent(self, event) -> None:
+        if self._tray is not None:
+            self._tray.hide()
         self._save_settings()
         if getattr(self, "_worker", None) is not None and self._thread.isRunning():
             self._worker.cancel()
@@ -740,6 +869,7 @@ def run() -> int:
     app.setApplicationName("uvr-lite")
     app.setWindowIcon(QIcon(str(_ICON)))
     win = MainWindow()
+    apply_theme(app, win)
     win.show()
     return app.exec()
 

@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.1.3-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.6-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -49,6 +49,7 @@ The base package is **self-contained** — Python, CPU PyTorch and the fp16-slim
 Tips:
 
 - **Inference engine**: choose **自动 / CPU / CUDA** in the GUI (auto picks the CUDA engine when a GPU is present, CPU otherwise); the switch takes effect after restarting uvr-lite
+- **Minimize to tray** (optional, off by default): when checked, minimizing hides the window in the notification area instead of the taskbar. Closing the window still exits. The tray menu can show the window again or quit.
 - **No GPU installed yet?** The GUI's **推理引擎** panel has a **下载 CUDA 引擎** button (resumable, multi-mirror fallback) — or run `uvr-lite install-cuda` from the CLI; install it whenever you like, no reinstall needed
 - **Upgrade**: run the installer again — it overwrites in place and keeps your settings
 - **Uninstall**: Control Panel → Programs and Features → uvr-lite (also available as `Uninstall.exe` in the install folder); removes shortcuts, registry settings and the install folder

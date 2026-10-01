@@ -3,10 +3,14 @@
 推理引擎裁剪自 ZFTurbo Music-Source-Separation-Training（MIT），
 模型（BS-RoFormer / Mel-Band RoFormer）与 Ultimate Vocal Remover 同源。
 
-torch 二进制切换（全量安装包内含 CPU/CUDA 两套 torch，独立目录）：
-  安装场景下 {app}/ 下存在 torch_cpu/ 与 torch_cuda/，本模块在导入时
-  按用户选择（torch.ini 或环境变量 UVR_TORCH）把对应目录插入 sys.path，
-  使后续 `import torch` 加载正确版本。开发场景（无这些目录）不干预，
+torch 二进制切换（安装目录内 CPU / CUDA 两套 torch，独立目录）：
+  安装场景下 {app}/ 下存在 torch_cpu/，勾选或补装后还有 torch_cuda/。
+  本模块在导入时按用户选择（torch.ini 或环境变量 UVR_TORCH）把对应目录
+  插入 sys.path，使后续 `import torch` 加载正确版本。选用 CUDA 时再把
+  torch_cpu 放在它后面：CPU 安装把 sympy、networkx、filelock、fsspec、
+  jinja2、mpmath 等纯 Python 依赖装进了 torch_cpu/，CUDA 目录只是 wheel
+  解压，不含这些包；缺了它们，`torch.utils.checkpoint` 会在 import sympy
+  处失败。torch 包本身仍由更靠前的目录命中。开发场景（无这些目录）不干预，
   使用环境中已安装的 torch。
 """
 
@@ -14,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "0.1.3"
+__version__ = "0.1.6"
 
 
 def _base_dir() -> Path:
@@ -62,11 +66,40 @@ def _torch_dir() -> Path | None:
     return None
 
 
+def _dependency_dirs(selected: Path) -> list[Path]:
+    """CUDA 引擎还要带上 torch_cpu，那里有 wheel 没带上的纯 Python 依赖。"""
+    if selected.name != "torch_cuda":
+        return []
+    cpu = selected.parent / "torch_cpu"
+    if cpu.is_dir():
+        return [cpu]
+    return []
+
+
+# 本模块插进 sys.path 的条目（切换引擎时整组撤下，避免 CUDA/CPU 叠在一起）。
+_managed_paths: list[str] = []
+
+
+def _apply_torch_paths(selected: Path | None) -> None:
+    """把选中的 torch 目录放到 sys.path 最前，CUDA 时紧跟 torch_cpu。"""
+    global _managed_paths
+    for entry in _managed_paths:
+        while entry in sys.path:
+            sys.path.remove(entry)
+    _managed_paths = []
+    if selected is None:
+        return
+    ordered = [selected, *_dependency_dirs(selected)]
+    for path in reversed(ordered):
+        entry = str(path)
+        while entry in sys.path:
+            sys.path.remove(entry)
+        sys.path.insert(0, entry)
+    _managed_paths = [str(path) for path in ordered]
+
+
 _torch_dir_ = _torch_dir()
-if _torch_dir_ is not None:
-    _path = str(_torch_dir_)
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+_apply_torch_paths(_torch_dir_)
 
 
 def set_torch_mode(mode: str) -> None:
@@ -76,11 +109,5 @@ def set_torch_mode(mode: str) -> None:
     new = _torch_dir()
     if new is None:
         return
-    new_path = str(new)
-    if _torch_dir_ is not None:
-        old_path = str(_torch_dir_)
-        while old_path in sys.path:
-            sys.path.remove(old_path)
-    if new_path not in sys.path:
-        sys.path.insert(0, new_path)
+    _apply_torch_paths(new)
     _torch_dir_ = new

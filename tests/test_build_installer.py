@@ -108,8 +108,8 @@ def test_packaging_consistency_passes_on_repo_text(packaging_root):
     ("CUDA_WHEEL = 'torch-2.7.1+cu128", "CUDA_WHEEL = 'torch-9.9.9+cu999", "CUDA_WHEEL"),
     (r'Source: "{tmp}\torch-2.7.1+cu128-cp312-cp312-win_amd64.zip"',
      r'Source: "{tmp}\other.zip"', "[Files] 解压源"),
-    ("CUDA_URL = 'https://mirrors.sjtug.sjtu.edu.cn",
-     "CUDA_URL = 'https://example.com", "CUDA_URL"),
+    (f"CUDA_URL = '{dl.TORCH_CUDA_URLS[0]}'",
+     "CUDA_URL = 'https://example.com'", "CUDA_URL"),
 ], ids=["sha", "字节数", "wheel常量", "files解压源", "url"])
 def test_cuda_asset_drift_is_fatal(packaging_root, old, new, needle):
     """CUDA 资产（SHA / 字节数 / 文件名 / 镜像）任一处漂移都必须报错。"""
