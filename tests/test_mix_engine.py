@@ -136,3 +136,48 @@ def test_combine_missing_files_raise(tmp_path):
     with pytest.raises(FileNotFoundError, match="人声轨"):
         combine(str(tmp_path / "nope-vocals.wav"), str(tmp_path / "nope-inst.wav"),
                 str(tmp_path / "out"))
+
+
+def test_combine_same_stem_different_dirs_keeps_both(tmp_path):
+    """不同目录、基名都是 song 的两对写到同一输出目录时，后一次不得盖掉前一次。"""
+    left = np.full((1, 200), 0.2, dtype=np.float32)
+    right = np.full((1, 200), 0.4, dtype=np.float32)
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    lv = _write(left_dir / "song-vocals.wav", left)
+    li = _write(left_dir / "song-instrumental.wav", left)
+    rv = _write(right_dir / "song-vocals.wav", right)
+    ri = _write(right_dir / "song-instrumental.wav", right)
+    out_dir = tmp_path / "out"
+
+    first = combine(str(lv), str(li), str(out_dir), verbose=False)
+    second = combine(str(rv), str(ri), str(out_dir), verbose=False)
+
+    assert len(list(out_dir.iterdir())) == 2
+    assert first.name == "song-mix.flac", "峰值 ≤ 1 时 auto 仍落 flac，且首次不改名"
+    assert np.allclose(_read(first), left * 2, atol=1e-5), "第一次的和不得被第二次盖掉"
+    assert second.name == "song-mix-2.flac"
+    assert np.allclose(_read(second), right * 2, atol=1e-5)
+
+
+def test_combine_existing_output_is_not_truncated(tmp_path):
+    """预先放好的 song-mix.flac 不得被截断；峰值 ≤ 1 的新结果落到 song-mix-2.flac。"""
+    sentinel = np.full((1, 160), 0.25, dtype=np.float32)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    preexisting = out_dir / "song-mix.flac"
+    sf.write(str(preexisting), sentinel.T, 8000, subtype="PCM_24")
+    before = _read(preexisting)
+
+    vocals = np.full((1, 160), 0.2, dtype=np.float32)
+    inst = np.full((1, 160), 0.3, dtype=np.float32)
+    v = _write(tmp_path / "song-vocals.wav", vocals)
+    i = _write(tmp_path / "song-instrumental.wav", inst)
+
+    out = combine(str(v), str(i), str(out_dir), verbose=False)
+
+    assert out.name == "song-mix-2.flac"
+    assert np.array_equal(_read(preexisting), before), "已有 song-mix.flac 的样本不得被截断重写"
+    assert np.allclose(_read(out), vocals + inst, atol=1e-5)

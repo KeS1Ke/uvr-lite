@@ -51,6 +51,19 @@ def _output_stem(vocals: Path, out_name: str | None) -> str:
     return vocals.stem
 
 
+def _mix_output_path(out_dir: Path, stem: str, codec: str) -> Path:
+    """空闲时 `{stem}-mix.{codec}`；已占用则 `{stem}-mix-2`、`-3`……直到空位。
+
+    用 Path.exists()：Windows 上 Song-mix 与 song-mix 是同一个文件，也会让开。
+    """
+    candidate = out_dir / f"{stem}-mix.{codec}"
+    n = 2
+    while candidate.exists():
+        candidate = out_dir / f"{stem}-mix-{n}.{codec}"
+        n += 1
+    return candidate
+
+
 def combine(
     vocals: str | Path,
     instrumental: str | Path,
@@ -64,10 +77,12 @@ def combine(
     verbose: bool = True,
     progress_callback: Callable[[str, int, int], bool] | None = None,
 ) -> Path:
-    """把人声与伴奏合成为一个文件，返回写出路径 `{stem}-mix.{ext}`。
+    """把人声与伴奏合成为一个文件，返回写出路径。
 
     采样率取两者较高值；声道数取较大者（单声道自动复制）；长度按最长
     补零/截断（同源分离结果天然等长）。normalize=False 时保持精确求和。
+    文件名默认 `{stem}-mix.{ext}`；该路径已存在时从 `{stem}-mix-2.{ext}`
+    起递增，避免截断已有文件。
     """
     vocals = Path(vocals)
     instrumental = Path(instrumental)
@@ -116,7 +131,7 @@ def combine(
     # 与分离引擎相同的 auto 规则：峰值 ≤ 1 落 FLAC，否则 WAV（PCM 会削波，
     # 这里只对齐行为；要真正避免削波请用 normalize）
     codec = "flac" if (fmt == "flac" or (fmt == "auto" and peak <= 1.0)) else "wav"
-    out_path = out_dir / f"{_output_stem(vocals, out_name)}-mix.{codec}"
+    out_path = _mix_output_path(out_dir, _output_stem(vocals, out_name), codec)
 
     written: list[Path] = []
     try:

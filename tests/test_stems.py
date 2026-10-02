@@ -59,6 +59,35 @@ def test_pair_stems_duplicate_kind_keeps_extras_unmatched(tmp_path):
     assert [p.name for p in result.unmatched] == ["song-vocals.wav"]
 
 
+def test_pair_stems_equal_counts_keeps_only_first_pair(tmp_path):
+    """两边数量相等时也只配名称排序后的第一对，避免交叉写成同一个 mix 路径。"""
+    result = pair_stems([
+        tmp_path / "song-vocals.flac",
+        tmp_path / "song-vocals.wav",
+        tmp_path / "song-inst.wav",
+        tmp_path / "song-instrumental.flac",
+    ])
+
+    assert len(result.pairs) == 1
+    assert result.pairs[0].vocals.name == "song-vocals.flac"
+    assert result.pairs[0].instrumental.name == "song-inst.wav"
+    assert {p.name for p in result.unmatched} == {
+        "song-instrumental.flac",
+        "song-vocals.wav",
+    }
+
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    result_dirs = pair_stems([
+        dir_a / "song-vocals.flac",
+        dir_a / "song-instrumental.flac",
+        dir_b / "song-vocals.wav",
+        dir_b / "song-instrumental.wav",
+    ])
+    assert len(result_dirs.pairs) == 2
+    assert result_dirs.unmatched == []
+
+
 def test_find_stem_pairs_scans_folder(tmp_path):
     (tmp_path / "a-vocals.flac").write_bytes(b"x")
     (tmp_path / "a-instrumental.flac").write_bytes(b"x")

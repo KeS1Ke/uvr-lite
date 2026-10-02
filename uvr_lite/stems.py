@@ -75,10 +75,13 @@ def pair_stems(paths: Iterable[Path]) -> PairResult:
     for kinds in groups.values():
         vocals = sorted(kinds.get("vocals", []), key=lambda p: p.name.lower())
         inst = sorted(kinds.get("instrumental", []), key=lambda p: p.name.lower())
-        for i in range(min(len(vocals), len(inst))):
-            result.pairs.append(StemPair(vocals=vocals[i], instrumental=inst[i]))
-        result.unmatched.extend(vocals[len(inst):])
-        result.unmatched.extend(inst[len(vocals):])
+        if vocals and inst:
+            result.pairs.append(StemPair(vocals=vocals[0], instrumental=inst[0]))
+            result.unmatched.extend(vocals[1:])
+            result.unmatched.extend(inst[1:])
+        else:
+            result.unmatched.extend(vocals)
+            result.unmatched.extend(inst)
 
     def by_name(p: Path) -> tuple[str, str]:
         return (str(p.parent).lower(), p.name.lower())

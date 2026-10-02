@@ -1032,6 +1032,8 @@ class MainWindow(QMainWindow):
             tta=self.check_tta.isChecked(),
         )
         self._worker = SeparationWorker(list(ok_paths), out_dir, params)
+        # 上一轮若没走到完成槽，这里仍占着事件循环；先退出再换指针，避免变成孤儿。
+        self._release_thread(self._thread)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -1082,6 +1084,7 @@ class MainWindow(QMainWindow):
         self._mix_queue = list(self._mix_pairs)
         self._mix_worker = CombineWorker(
             [(p.vocals, p.instrumental) for p in self._mix_queue], out_dir, params)
+        self._release_thread(self._mix_thread)
         self._mix_thread = QThread(self)
         self._mix_worker.moveToThread(self._mix_thread)
         self._mix_thread.started.connect(self._mix_worker.run)
@@ -1140,7 +1143,34 @@ class MainWindow(QMainWindow):
         _log().warning("分离失败 %s: %s", name, error)
         self.label_status.setText(f"{name} 处理失败，已跳过（{error[:80]}）")
 
+    @staticmethod
+    def _is_thread_running(thread) -> bool:
+        """线程是否仍在运行；C++ 对象已被回收时算「不在运行」。
+
+        finished 连着 deleteLater，任务跑完一轮后 self._thread / _mix_thread
+        只剩 Python 包装器，裸调 isRunning() 会抛 RuntimeError。closeEvent
+        里没兜住就会跳过后面所有线程的 cancel+wait，而带活销毁运行中的
+        QThread 会让进程 abort（0xC0000409），写了一半的输出也可能被截断。
+        """
+        if thread is None:
+            return False
+        try:
+            return thread.isRunning()
+        except RuntimeError:
+            return False
+
+    def _release_thread(self, thread) -> None:
+        """让仍停在 exec() 的任务线程退出。未启动或已销毁则不动。
+
+        started 接到 worker.run：run() 返回后线程还在事件循环里，
+        isRunning() 仍为真，finished/deleteLater 不会发生。
+        """
+        if self._is_thread_running(thread):
+            thread.quit()
+            thread.wait(5000)
+
     def _on_all_finished(self, ok, failed, cancelled) -> None:
+        self._release_thread(self._thread)
         self._set_busy(False)
         msg = summary_text(ok, self._failed_names)
         if cancelled:
@@ -1186,6 +1216,7 @@ class MainWindow(QMainWindow):
         self.label_status.setText(f"{name} 合成失败，已跳过（{error[:80]}）")
 
     def _on_mix_finished(self, ok, failed, cancelled) -> None:
+        self._release_thread(self._mix_thread)
         self._set_busy(False)
         msg = summary_text(ok, self._mix_failed_names)
         if cancelled:
@@ -1319,20 +1350,27 @@ class MainWindow(QMainWindow):
         if self._tray is not None:
             self._tray.hide()
         self._save_settings()
-        if getattr(self, "_worker", None) is not None and self._thread.isRunning():
+        # 统一走 _is_thread_running：任务跑完后 QThread 已被 deleteLater 回收，
+        # 裸调 isRunning() 抛的 RuntimeError 会逃出 closeEvent，后面几个线程就
+        # 不再 cancel+wait（运行中的 QThread 带活销毁 → 进程 abort）。
+        if (getattr(self, "_worker", None) is not None
+                and self._is_thread_running(self._thread)):
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
-        if getattr(self, "_mix_worker", None) is not None and self._mix_thread.isRunning():
+        if (getattr(self, "_mix_worker", None) is not None
+                and self._is_thread_running(self._mix_thread)):
             self._mix_worker.cancel()
             self._mix_thread.quit()
             self._mix_thread.wait(5000)
-        if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
+        if (getattr(self, "_dl_thread", None) is not None
+                and self._is_thread_running(self._dl_thread)):
             if getattr(self, "_dl_worker", None) is not None:
                 self._dl_worker.cancel()
             self._dl_thread.quit()
             self._dl_thread.wait(3000)
-        if getattr(self, "_cuda_thread", None) is not None and self._cuda_thread.isRunning():
+        if (getattr(self, "_cuda_thread", None) is not None
+                and self._is_thread_running(self._cuda_thread)):
             if getattr(self, "_cuda_worker", None) is not None:
                 self._cuda_worker.cancel()
             self._cuda_thread.quit()
