@@ -12,7 +12,9 @@
    命中当前工作树，而不是 editable 安装可能指向的另一份 checkout。
 2. autouse fixture：每个用例把 ``uvr_lite.log.repo_root`` 指向 pytest 的
    ``tmp_path``，并在用例前后关句柄 + 清 ``_READY`` 幂等缓存。
-3. session 级 ``qapp`` fixture：整个进程只建一个 QApplication。
+3. autouse fixture：把 ``MainWindow`` 构造时读的 ``QSettings("uvr-lite",
+   "uvr-lite")`` 落到本例 tmp ini（见 ``isolated_user_settings``）。
+4. session 级 ``qapp`` fixture：整个进程只建一个 QApplication。
 
 与 tests/test_log.py 的关系：该文件自带同款的模块级 autouse fixture（也是
 monkeypatch ``uvr_lite.log.repo_root``）。conftest 的 autouse 先设置、模块内
@@ -75,6 +77,34 @@ def isolated_log_root(tmp_path, monkeypatch):
     _forget_handlers(log)  # 上一条用例残留的 handler 指向旧路径
     yield tmp_path
     _forget_handlers(log)  # 本例的 handler 指向本例 tmp，仍要关掉释放句柄
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_settings(tmp_path, monkeypatch):
+    """让 ``MainWindow()`` 构造时读的 QSettings 落到本例专属的 tmp ini。
+
+    背景：``MainWindow.__init__`` 建窗口时就 ``_restore_settings()``，读的是
+    ``QSettings("uvr-lite", "uvr-lite")``（Windows 上是用户注册表）。各 UI 模块
+    「先建窗口、再替换 ``w.settings``」的顺序挡不住这一次读取：开发机上存过
+    ``mode=1``（合成页）、``tta=true``、``out_dir`` 等值，用例结果就取决于开发
+    机的用户配置——窗口开在合成页时，拖放/预检/模式切换用例会整片失败。
+
+    test_ui_theme / test_ui_tray 早已用同一个「建窗口前换掉模块里的 QSettings」
+    手法自保，这里提到 conftest 做全 suite 兜底；模块内再 monkeypatch 一次仍然
+    后设置生效（monkeypatch 的 undo 是 LIFO）。
+    """
+    from PySide6.QtCore import QSettings
+
+    import uvr_lite.ui.main as main
+
+    ini = tmp_path / "qsettings.ini"
+
+    class _IniSettings(QSettings):
+        def __init__(self, *args, **kwargs):
+            super().__init__(str(ini), QSettings.IniFormat)
+
+    monkeypatch.setattr(main, "QSettings", _IniSettings)
+    yield ini
 
 
 @pytest.fixture(scope="session")
