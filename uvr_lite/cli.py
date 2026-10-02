@@ -1,7 +1,8 @@
-"""命令行入口：uvr-lite separate / download / models / version。"""
+"""命令行入口：uvr-lite separate / mix / download / models / version。"""
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import __version__
 from .download import ensure_model, model_file, retired_model_files
@@ -27,6 +28,42 @@ def _cmd_separate(args: argparse.Namespace) -> int:
             inp, args.out, pcm=pcm,
             fmt=args.format, bigshifts=args.bigshifts, tta=args.tta,
         )
+    return 0
+
+
+def _cmd_mix(args: argparse.Namespace) -> int:
+    """人声＋伴奏合成整曲：单对或 --batch 目录自动配对批量。"""
+    from .mix import combine
+    from .stems import find_stem_pairs, split_stem
+
+    def _one(vocals: str, instrumental: str) -> None:
+        # combine 的 verbose 输出已含「写出: 路径」，这里不再重复打印
+        combine(
+            vocals, instrumental, args.out,
+            vocal_gain=args.vocal_gain, inst_gain=args.inst_gain,
+            pcm=f"PCM_{args.pcm}", fmt=args.format, normalize=args.normalize,
+        )
+
+    if args.batch:
+        result = find_stem_pairs(Path(args.batch))
+        for p in result.unmatched:
+            kind = split_stem(p)
+            missing = "伴奏" if kind and kind[1] == "vocals" else "人声"
+            print(f"未配对（缺{missing}）: {p.name}")
+        for p in result.ignored:
+            print(f"跳过（非分离音轨命名）: {p.name}")
+        if not result.pairs:
+            print("[ERROR] 没有可配对的音轨"
+                  "（目录下需要 *-vocals 与 *-instrumental 成对存在）。")
+            return 1
+        for pair in result.pairs:
+            _one(str(pair.vocals), str(pair.instrumental))
+        return 0
+
+    if not args.vocals or not args.instrumental:
+        print("[ERROR] 请同时给出人声与伴奏文件，或使用 --batch DIR 批量配对。")
+        return 1
+    _one(args.vocals, args.instrumental)
     return 0
 
 
@@ -85,7 +122,7 @@ def _cmd_models(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="uvr-lite",
-        description="轻量级人声/伴奏分离工具（BS-RoFormer，模型与 UVR 同源）",
+        description="轻量级人声/伴奏分离与合成工具（BS-RoFormer，模型与 UVR 同源）",
     )
     parser.add_argument("--version", action="version", version=f"uvr-lite {__version__}")
     sub = parser.add_subparsers(dest="command")
@@ -111,6 +148,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_sep.add_argument("--tta", action="store_true",
                        help="测试时增强（极性/声道反转平均，三倍耗时，默认关）")
     p_sep.set_defaults(func=_cmd_separate)
+
+    p_mix = sub.add_parser("mix", help="人声＋伴奏合成整曲（分离的逆运算）")
+    p_mix.add_argument("vocals", nargs="?", help="人声轨（分离输出的 *-vocals）")
+    p_mix.add_argument("instrumental", nargs="?",
+                       help="伴奏轨（分离输出的 *-instrumental）")
+    p_mix.add_argument("--batch", metavar="DIR",
+                       help="扫描文件夹，按 *-vocals / *-instrumental 自动配对批量合成")
+    p_mix.add_argument("--out", "-o", default="output", help="输出目录（默认 ./output）")
+    p_mix.add_argument("--format", default="auto", choices=["auto", "flac", "wav"],
+                       help="输出格式：auto 按峰值自动选择（默认）；flac/wav 强制")
+    p_mix.add_argument("--pcm", type=int, default=24, choices=[16, 24],
+                       help="FLAC 位深（默认 24）")
+    p_mix.add_argument("--vocal-gain", type=float, default=1.0,
+                       help="人声音量倍率（默认 1.0）")
+    p_mix.add_argument("--inst-gain", type=float, default=1.0,
+                       help="伴奏音量倍率（默认 1.0）")
+    p_mix.add_argument("--normalize", action="store_true",
+                       help="峰值归一到 -1 dBFS（防止叠加爆音；默认保持精确求和）")
+    p_mix.set_defaults(func=_cmd_mix)
 
     p_dl = sub.add_parser("download", help="下载模型权重（带 SHA256 校验）")
     p_dl.add_argument("model", nargs="?", default=DEFAULT_MODEL,

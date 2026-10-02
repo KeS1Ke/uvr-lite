@@ -2,19 +2,22 @@
 
 [English](README.md) | **简体中文**
 
-![version](https://img.shields.io/badge/version-0.1.6-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.7-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 ![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**轻量级人声 / 伴奏分离工具** —— 一个模型文件（约 320 MB），一键安装，输出两个无损音轨。同时提供 **中文桌面界面（Windows）** 与 **命令行**。
+**轻量级人声 / 伴奏分离与合成工具** —— 一个模型文件（约 320 MB），一键安装，输出两个无损音轨，也能把两轨一键合回整曲。同时提供 **中文桌面界面（Windows）** 与 **命令行**。
 
 ```bash
 uvr-lite separate 歌曲.flac -o output
 # → output/歌曲-vocals.flac        （人声轨）
 # → output/歌曲-instrumental.flac  （伴奏轨，= 原曲 − 人声，数学无损）
+
+uvr-lite mix output/歌曲-vocals.flac output/歌曲-instrumental.flac -o mixed
+# → mixed/歌曲-mix.flac            （合回整曲，分离的逆运算）
 ```
 
 ## 演示
@@ -31,6 +34,7 @@ uvr-lite separate 歌曲.flac -o output
 - **一键部署**：`install.bat`（Windows）/ `install.sh`（Linux/macOS）自动完成 venv + 依赖 + torch（CPU/CUDA 自动分流）+ 模型下载（SHA256 校验）+ 冒烟测试
 - **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（约 3 分钟）约 **51 秒**
 - **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
+- **音轨合成**：分离后的人声＋伴奏一键合回整曲（分离的逆运算）；默认精确求和（同源分离结果可还原原曲），人声/伴奏增益可调，可峰值归一化；CLI 与桌面界面均支持
 - **无训练代码**：仅推理，仓库代码 < 1 MB
 - 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
 
@@ -48,6 +52,7 @@ uvr-lite separate 歌曲.flac -o output
 
 小贴士：
 
+- **音轨合成**：底部「**功能**」下拉框可在「人声/伴奏分离」与「音轨合成（人声＋伴奏）」之间切换。合成页把音轨拖进窗口（或选择文件夹）即自动配对，列表显示 **✓** 已配对 / **✗** 缺少另一半；可调人声/伴奏音量、输出格式/位深与峰值归一化，点「**开始合成**」即可。合成不加载模型（纯 DSP，秒级完成）
 - **推理引擎**：界面里可选 **自动 / CPU / CUDA**（自动模式：有独立显卡用 CUDA 引擎，否则 CPU 版）；切换后重启 uvr-lite 生效
 - **最小化到系统托盘**（可选，默认关闭）：勾选后，最小化会收到通知区域，而不是留在任务栏。点窗口关闭仍然退出。托盘菜单可以重新显示主窗口，或退出程序。
 - **暂时没有独立显卡？** 界面「**推理引擎**」区有「**下载 CUDA 引擎**」按钮（断点续传 + 多镜像回退），或在命令行运行 `uvr-lite install-cuda`——想什么时候装都行，无需重装
@@ -77,7 +82,7 @@ bash install.sh
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat（PowerShell: .venv\Scripts\Activate.ps1）
-pip install -e .
+pip install -e ".[ui]"                               # [ui] = 图形界面依赖（PySide6）；只要命令行可去掉
 uvr-lite download                                    # 下载模型（约 320 MB）
 ```
 
@@ -127,6 +132,12 @@ uvr-lite separate song.flac --batch-size 1
 # 质量/速度开关：1 = 无重叠（约 2 倍提速），2 = 默认，更大更稳
 uvr-lite separate song.flac --num-overlap 1
 
+# 音轨合成：人声＋伴奏合回整曲（默认精确求和）
+uvr-lite mix output/song-vocals.flac output/song-instrumental.flac -o mixed
+
+# 批量合成：扫描文件夹自动配对（*-vocals + *-instrumental）
+uvr-lite mix --batch output -o mixed
+
 # 查看模型状态 / 强制重下
 uvr-lite models
 uvr-lite download --force
@@ -146,12 +157,27 @@ uvr-lite install-cuda
 | `--num-overlap N` | 重叠窗口数（质量/速度开关）：`1` 最快约 2 倍；默认取模型配置（主力 2 / karaoke 4），显式传值才覆盖 |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
 
+`mix` 子命令参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--out, -o` | 输出目录（默认 `./output`） |
+| `--batch DIR` | 扫描文件夹，按命名自动配对批量合成 |
+| `--format` | `auto`（按峰值自动选 flac/wav，默认）/ `flac` / `wav` |
+| `--pcm` | 输出位深 `16` / `24`（默认） |
+| `--vocal-gain` | 人声音量倍率（默认 `1.0`） |
+| `--inst-gain` | 伴奏音量倍率（默认 `1.0`） |
+| `--normalize` | 峰值归一到 -1 dBFS（防止叠加爆音；默认保持精确求和） |
+
+配对按文件名后缀识别（大小写不敏感）：人声 `-vocals` / `_vocals`，伴奏 `-instrumental` / `_instrumental` / `-inst` / `_inst`；扩展名可不同。
+
 **注意事项**
 
 - **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
 - **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.9 GB
 - **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
+- **CUDA 引擎的 Python 版本**：内置 wheel 只有 `cp312/win_amd64` 一款，因此 `install-cuda`（及界面里的下载按钮）要求 **64 位 Windows + Python 3.12**——官方安装包内置的正是这个版本。其他 Python 版本会在下载前就被拦下并给出说明，不会白下 3.3 GB 装不上；CPU 引擎不受影响。想在别的环境用显卡加速，从 PyPI 装 CUDA 版 torch 即可：`pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## 工作原理
 
@@ -162,6 +188,14 @@ uvr-lite install-cuda
        → soundfile 写 FLAC/WAV
 ```
 
+**音轨合成**（`mix`，分离的逆运算）：
+
+```
+人声 + 伴奏 → soundfile+soxr 解码 → 按较高采样率重采样 → 补声道 / 补长度
+           → 增益求和 → （可选峰值归一化）→ soundfile 写出 {stem}-mix.flac|wav
+```
+
+- **精确求和**：同源分离结果默认精确相加（instrumental = 原混合 − vocals），不归一化即可还原原曲；采样率取两者较高值，单声道自动复制，长度按最长补零/截断
 - **引擎**：`msst/` 为 [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) 的**推理最小子集**（裁剪训练/验证/集成/GUI，仅保留 RoFormer 家族推理路径）
 - **模型**：默认模型托管于本仓库 [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models)，为 **fp16 瘦身 safetensors** 文件（320 MB；`scripts/strip_model.py` 由原版转换——体积减半、无 pickle 载入面，加载时透明转回 fp32 推理）。SHA256 完整性校验，不入 git；下载器内建多段并发与重试
 - **批量处理复用会话**：多文件队列共用一个已加载模型（`Separator` 会话），不再逐文件重载 320MB（fp16 瘦身版）权重
@@ -169,8 +203,12 @@ uvr-lite install-cuda
 
 ```
 uvr-lite/
-├── uvr_lite/          # CLI 包：separate / download / models 命令
+├── uvr_lite/          # CLI 包：separate / mix / download / models 命令
 │   ├── engine.py      #   分离引擎（bigshifts 平均、instrumental 数学无损）
+│   ├── mix.py         #   合成引擎（人声＋伴奏求和，分离的逆运算）
+│   ├── stems.py       #   音轨配对（*-vocals / *-instrumental 自动成对）
+│   ├── audio_io.py    #   解码/重采样/扫描（合成与 CLI 共用，不依赖 torch）
+│   ├── errors.py      #   共享取消异常
 │   ├── models.py      #   模型注册表（URL + SHA256）
 │   ├── download.py    #   流式下载 + 完整性校验 + CUDA 引擎安装
 │   └── configs/       #   模型配置 yaml

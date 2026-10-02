@@ -2,19 +2,22 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.1.6-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.7-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
 ![inference](https://img.shields.io/badge/inference-PyTorch%20CPU%20%2F%20CUDA-orange)
 ![downloads](https://img.shields.io/github/downloads/KeS1Ke/uvr-lite/total)
 
-**A lightweight vocal / instrumental separation tool** — one model file (320 MB, fp16 safetensors), a one-click installer, two lossless stems. Ships both a **Chinese desktop GUI (Windows)** and a **CLI**.
+**A lightweight vocal / instrumental separation & mixing tool** — one model file (320 MB, fp16 safetensors), a one-click installer, two lossless stems, and one-command mixing of the stems back into a full track. Ships both a **Chinese desktop GUI (Windows)** and a **CLI**.
 
 ```bash
 uvr-lite separate song.flac -o output
 # → output/song-vocals.flac        (vocal stem)
 # → output/song-instrumental.flac  (instrumental stem, = mix − vocals, mathematically lossless)
+
+uvr-lite mix output/song-vocals.flac output/song-instrumental.flac -o mixed
+# → mixed/song-mix.flac            (stems combined back into the full track)
 ```
 
 ## Demo
@@ -31,6 +34,7 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 - **One-click install**: `install.bat` (Windows) / `install.sh` (Linux/macOS) — venv + dependencies + torch (CPU/CUDA auto-detection) + model download (SHA256 verified) + smoke test
 - **Primary model**: BS-RoFormer ep317 (trained by viperx, SDR ≈ 10.9–12.9 dB) — a full track (~3 min) takes about **51 s** on an RTX 4060
 - **Lossless output**: FLAC (16/24 bit) or WAV, original 44.1 kHz sample rate preserved
+- **Stem mixing**: combine vocals + instrumental back into the full track (the inverse of separation); exact summation by default (recovers the original mix from same-source stems), adjustable vocal/instrumental gain, optional peak normalization; available in both the CLI and the desktop GUI
 - **No training code**: inference only, repo code < 1 MB
 - Optional second model: `mel_band_karaoke` (Mel-Band RoFormer Karaoke, trained by aufr33 & viperx)
 
@@ -48,6 +52,7 @@ The base package is **self-contained** — Python, CPU PyTorch and the fp16-slim
 
 Tips:
 
+- **Stem mixing**: the **功能** (mode) dropdown at the bottom switches between **人声/伴奏分离** (separation) and **音轨合成（人声＋伴奏）** (mixing). On the mixing page, drag in vocal/instrumental files (or pick a folder) and they pair automatically; the list shows **✓** paired / **✗** missing counterpart. Adjust vocal/instrumental gain, output format/bit depth and peak normalization, then click **开始合成** (Start Mixing). Mixing loads no model (pure DSP, takes seconds)
 - **Inference engine**: choose **自动 / CPU / CUDA** in the GUI (auto picks the CUDA engine when a GPU is present, CPU otherwise); the switch takes effect after restarting uvr-lite
 - **Minimize to tray** (optional, off by default): when checked, minimizing hides the window in the notification area instead of the taskbar. Closing the window still exits. The tray menu can show the window again or quit.
 - **No GPU installed yet?** The GUI's **推理引擎** panel has a **下载 CUDA 引擎** button (resumable, multi-mirror fallback) — or run `uvr-lite install-cuda` from the CLI; install it whenever you like, no reinstall needed
@@ -77,7 +82,7 @@ The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUD
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat (PowerShell: .venv\Scripts\Activate.ps1)
-pip install -e .
+pip install -e ".[ui]"                               # [ui] = GUI extras (PySide6); drop it for a CLI-only setup
 uvr-lite download                                    # download the model (~320 MB)
 ```
 
@@ -127,6 +132,12 @@ uvr-lite separate song.flac --batch-size 1
 # Speed/quality knob: 1 = no overlap (~2× faster), 2 = default, higher = smoother
 uvr-lite separate song.flac --num-overlap 1
 
+# Stem mixing: combine vocals + instrumental back into the full track (exact summation by default)
+uvr-lite mix output/song-vocals.flac output/song-instrumental.flac -o mixed
+
+# Batch mixing: scan a folder and auto-pair (*-vocals + *-instrumental)
+uvr-lite mix --batch output -o mixed
+
 # List models / force re-download
 uvr-lite models
 uvr-lite download --force
@@ -146,12 +157,27 @@ uvr-lite install-cuda
 | `--num-overlap N` | Overlapping chunk count (speed/quality knob): `1` = no overlap (~2× faster); default from model config (2 for the primary model, 4 for karaoke) — pass a value to override |
 | `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
 
+`mix` subcommand options:
+
+| Option | Description |
+|---|---|
+| `--out, -o` | Output directory (default `./output`) |
+| `--batch DIR` | Scan a folder and auto-pair by filename for batch mixing |
+| `--format` | `auto` (flac/wav chosen by peak level, default) / `flac` / `wav` |
+| `--pcm` | Output bit depth `16` / `24` (default) |
+| `--vocal-gain` | Vocal gain multiplier (default `1.0`) |
+| `--inst-gain` | Instrumental gain multiplier (default `1.0`) |
+| `--normalize` | Normalize peak to -1 dBFS (prevents clipping when summing; off by default for exact summation) |
+
+Pairing is filename-based and case-insensitive: vocals `-vocals` / `_vocals`, instrumental `-instrumental` / `_instrumental` / `-inst` / `_inst`; extensions may differ.
+
 **Notes**
 
 - **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
 - **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
 - **Disk space**: ~1.2 GB after installing the CPU package; +~4.9 GB if you add the CUDA engine
 - **Model SHA256** is verified once and cached (`*.verified` marker) — subsequent runs skip the full-file hash
+- **CUDA engine ABI**: the bundled wheel is `cp312/win_amd64` only, so `install-cuda` (and the GUI's download button) requires **64-bit Windows + Python 3.12** — which is what the official installer ships. On any other interpreter the command stops with an explanatory error instead of downloading 3.3 GB that cannot import; the CPU engine is unaffected. For GPU acceleration elsewhere, install the CUDA build of torch from PyPI: `pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## How It Works
 
@@ -162,6 +188,15 @@ input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optiona
             → soundfile writes FLAC/WAV
 ```
 
+**Stem mixing** (`mix`, the inverse of separation):
+
+```
+vocals + instrumental → soundfile+soxr decode → resample to the higher sample rate
+                      → fit channels / fit length → gain-summed mix
+                      → (optional peak normalization) → soundfile writes {stem}-mix.flac|wav
+```
+
+- **Exact summation**: same-source stems are summed exactly by default (`instrumental = mix − vocals`), so the original mix is recovered without normalization; the higher sample rate wins, mono is duplicated to match channels, and lengths are zero-padded/truncated to the longest
 - **Engine**: `msst/` is an **inference-only subset** of [ZFTurbo Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (training/validation/ensemble/GUI removed, only the RoFormer family inference path kept)
 - **Model**: the default model is hosted on this repo's [GitHub Releases](https://github.com/KeS1Ke/uvr-lite/releases/tag/models) as an **fp16-slimmed safetensors** file (320 MB; `scripts/strip_model.py` converts the original — half the size, no pickle deserialization surface, load-time transparently casts back to fp32 for inference). SHA256-verified, kept out of git; the downloader has built-in multi-segment concurrency and retries
 - **Batch processing** reuses one loaded model across all files (`Separator` session) — a multi-file queue no longer reloads the 320 MB fp16 model per file
@@ -169,8 +204,12 @@ input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optiona
 
 ```
 uvr-lite/
-├── uvr_lite/          # CLI package: separate / download / models commands
+├── uvr_lite/          # CLI package: separate / mix / download / models commands
 │   ├── engine.py      #   separation engine (bigshifts averaging, lossless instrumental)
+│   ├── mix.py         #   mixing engine (vocals + instrumental sum, inverse of separation)
+│   ├── stems.py       #   stem pairing (*-vocals / *-instrumental auto-pairing)
+│   ├── audio_io.py    #   decode/resample/scan (shared by mixing and the CLI, no torch)
+│   ├── errors.py      #   shared cancellation exception
 │   ├── models.py      #   model registry (URL + SHA256)
 │   ├── download.py    #   streaming download + integrity check + CUDA engine installer
 │   └── configs/       #   model config yaml files

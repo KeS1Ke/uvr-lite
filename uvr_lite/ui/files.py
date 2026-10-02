@@ -1,14 +1,15 @@
-"""输入文件扫描：文件夹添加方式的音频文件发现。"""
+"""输入文件扫描：文件夹添加方式的音频文件发现。
+
+后缀表与扫描实现已上移到 ``uvr_lite.audio_io``（CLI 批量合成共用同一来源，
+避免两份扩展名表漂移），这里保留旧导入路径（main/测试从本模块导入）。
+"""
 
 from collections.abc import Iterable
 from pathlib import Path
 
-# 常见音频格式（engine._load_audio 主链路 soundfile 可解码的子集；mp3 需 libsndfile ≥ 1.1）
-AUDIO_EXTS = {".mp3", ".flac", ".wav", ".ogg", ".m4a"}
-
-
-def is_audio(path: Path) -> bool:
-    return path.suffix.lower() in AUDIO_EXTS
+from ..audio_io import AUDIO_EXTS as AUDIO_EXTS
+from ..audio_io import is_audio as is_audio
+from ..audio_io import scan_audio_files as scan_audio_files
 
 
 def precheck_audio(path: Path) -> bool:
@@ -36,21 +37,6 @@ def precheck_audio(path: Path) -> bool:
         return True
     except Exception:
         return False
-
-
-def scan_audio_files(folder: Path) -> list[Path]:
-    """扫描文件夹下直接包含的音频文件（非递归），按名称排序。
-
-    - 只取顶层文件（不进入子目录），行为可预期
-    - 返回解析后的绝对路径，供列表去重
-    """
-    folder = Path(folder)
-    if not folder.is_dir():
-        return []
-    return sorted(
-        (p.resolve() for p in folder.iterdir() if p.is_file() and is_audio(p)),
-        key=lambda p: p.name.lower(),
-    )
 
 
 def dedup_paths(paths: Iterable[Path]) -> list[Path]:

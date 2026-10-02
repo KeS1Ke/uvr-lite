@@ -42,6 +42,22 @@ def test_tta_and_write():
     assert t.on_progress("write", 2, 2) == pytest.approx(1.00)
 
 
+def test_mix_phase_monotonic():
+    """合成路径（decode ×2 → mix → write）权重单调且首尾衔接。"""
+    t = ProgressTracker()
+    seq = [
+        ("decode", 0, 2), ("decode", 1, 2), ("decode", 2, 2),
+        ("mix", 0, 1), ("mix", 1, 1),
+        ("write", 0, 1), ("write", 1, 1),
+    ]
+    values = [t.on_progress(p, d, tot) for p, d, tot in seq]
+    assert values == sorted(values), f"合成进度必须单调: {values}"
+    assert values[0] == 0.0
+    assert values[-1] == pytest.approx(1.0)
+    assert values[3] == pytest.approx(0.55)
+    assert values[4] == pytest.approx(0.90)
+
+
 def test_unknown_phase_returns_zero():
     assert ProgressTracker().on_progress("unknown", 1, 1) == 0.0
 

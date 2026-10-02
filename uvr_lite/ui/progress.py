@@ -9,14 +9,20 @@
 # 阶段中文名：单一来源——ui/main.py 从这里导入，不再自建第二张表（两份词表漂移时
 # 状态栏会显示未翻译的阶段名）。键集合必须与 ProgressTracker.on_progress 认识的阶段
 # 一致：漂移会让进度条停在该阶段起点，tests/test_ui_files.py 有按键遍历的行为守卫。
-PHASE_CN = {"decode": "解码", "infer": "推理", "chunk": "推理", "tta": "增强", "write": "写出"}
+PHASE_CN = {
+    "decode": "解码", "infer": "推理", "chunk": "推理",
+    "tta": "增强", "mix": "合成", "write": "写出",
+}
 
 
 class ProgressTracker:
-    """把引擎的阶段回调（decode/infer/chunk/tta/write）映射为文件内进度。
+    """把引擎的阶段回调（decode/infer/chunk/tta/mix/write）映射为文件内进度。
 
-    权重分配：decode 5% → chunk/infer 45%（bigshifts 多 pass 均分，chunk
+    分离权重：decode 5% → chunk/infer 45%（bigshifts 多 pass 均分，chunk
     为当前 pass 内部子进度）→ tta 40% → write 10%。
+    合成权重：decode 5%（两文件各半步）→ mix 55%→90%（占 35%）→ write 10%；
+    分离路径不会收到 mix 回调，合成路径不会收到 infer/chunk/tta，共用一张表
+    不互相干扰。
     """
 
     def __init__(self, bigshifts: int = 1):
@@ -35,6 +41,8 @@ class ProgressTracker:
             return 0.05 + (done / self.bigshifts) * 0.45
         if phase == "tta":
             return 0.50 + 0.40 * (done / total if total else 0)
+        if phase == "mix":
+            return 0.55 + 0.35 * (done / total if total else 0)
         if phase == "write":
             return 0.90 + 0.10 * (done / total if total else 0)
         return 0.0

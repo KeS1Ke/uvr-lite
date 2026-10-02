@@ -1,10 +1,12 @@
-"""分离任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。
+"""任务 Worker：QThread 中逐文件调用引擎，进度/取消/失败经信号上报。
 
-会话复用：run() 开始时创建一个 Separator（模型只加载一次），全部文件共用，
-避免每文件重载模型（批量场景的主要提速点）。
+- SeparationWorker：分离任务，run() 开始时创建一个 Separator（模型只加载
+  一次），全部文件共用，避免每文件重载模型（批量场景的主要提速点）。
+- CombineWorker：合成任务（人声＋伴奏回混），逐对调用 mix.combine，不加载
+  模型；信号与 SeparationWorker 完全一致，主窗口接线可复用。
 
 引擎惰性导入：worker 模块只依赖 Qt/轻量模块，torch（约 2-6s 导入 + 上 GB
-内存）推迟到首个分离任务才加载——UI 启动、列表编辑零引擎开销。
+内存）推迟到首个分离任务才加载——UI 启动、列表编辑、合成任务零引擎开销。
 """
 
 from dataclasses import dataclass
@@ -34,6 +36,17 @@ class SeparationParams:
     batch_size: int | None = None
     num_overlap: int | None = None
     tta: bool = False
+
+
+@dataclass
+class CombineParams:
+    """UI 合成表单 → CombineWorker 的参数。"""
+
+    vocal_gain: float = 1.0
+    inst_gain: float = 1.0
+    fmt: str = "auto"
+    pcm: str = "PCM_24"
+    normalize: bool = False
 
 
 class SeparationWorker(QObject):
@@ -107,6 +120,67 @@ class SeparationWorker(QObject):
     def _on_progress(self, phase: str, done: int, total: int) -> bool:
         pct = round(self._tracker.on_progress(phase, done, total) * 100)
         self.progress.emit(phase, done, total, self._cur_idx, len(self.files), pct)
+        return not self._cancel
+
+
+class CombineWorker(QObject):
+    """合成任务 Worker：逐对（人声, 伴奏）调用 mix.combine，信号与分离一致。"""
+
+    # phase, done, total, file_idx, file_total, file_pct(0-100, 文件内)
+    progress = Signal(str, int, int, int, int, int)
+    file_done = Signal(int, list)      # file_idx, 写出文件列表
+    file_failed = Signal(int, str)     # file_idx, 错误信息
+    all_finished = Signal(int, int, bool)  # 成功数, 失败数, 是否取消
+
+    def __init__(self, pairs: list[tuple[Path, Path]], out_dir: str, params: CombineParams):
+        super().__init__()
+        self.pairs = pairs
+        self.out_dir = out_dir
+        self.params = params
+        self._cancel = False
+        self._cur_idx = 0
+        self._tracker = ProgressTracker()
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        # 惰性导入：mix 不 import torch，合成任务比分离任务更早可用
+        from ..errors import CancelledError
+        from ..mix import combine
+
+        ok = failed = 0
+        total = len(self.pairs)
+        for idx, (vocals, instrumental) in enumerate(self.pairs):
+            self._cur_idx = idx
+            self._tracker = ProgressTracker()  # 每对重置，进度不回跳
+            if self._cancel:
+                break
+            try:
+                written = combine(
+                    str(vocals), str(instrumental), str(self.out_dir),
+                    vocal_gain=self.params.vocal_gain,
+                    inst_gain=self.params.inst_gain,
+                    pcm=self.params.pcm,
+                    fmt=self.params.fmt,
+                    normalize=self.params.normalize,
+                    verbose=False,
+                    progress_callback=self._on_progress,
+                )
+                ok += 1
+                self.file_done.emit(idx, [str(written)])
+            except CancelledError:
+                self._cancel = True
+                break
+            except Exception as e:
+                failed += 1
+                log_exception(f"合成失败（第 {idx + 1}/{total} 对）: {vocals}")
+                self.file_failed.emit(idx, friendly_error(e))
+        self.all_finished.emit(ok, failed, self._cancel)
+
+    def _on_progress(self, phase: str, done: int, total: int) -> bool:
+        pct = round(self._tracker.on_progress(phase, done, total) * 100)
+        self.progress.emit(phase, done, total, self._cur_idx, len(self.pairs), pct)
         return not self._cancel
 
 

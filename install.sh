@@ -33,8 +33,13 @@ else
 fi
 
 # ---- 4. install package + deps ----
-echo "[4/5] Installing uvr-lite and dependencies ..."
-pip install --quiet -e .
+# 必须带 [ui] extras：GUI 依赖 PySide6-Essentials 只挂在 optional extra 上，
+# 裸 `pip install -e .` 装出来的环境跑 `uvr-lite ui` 会 ImportError。
+# 缺系统 Qt 库（如 libGL）时 PySide6 可能装不上，此时退回裸装保 CLI 可用。
+echo "[4/5] Installing uvr-lite and dependencies (including GUI extras) ..."
+pip install --quiet -e ".[ui]" \
+    || { echo "      [WARN] GUI extras failed (missing system Qt libs?), continuing without GUI" >&2
+         pip install --quiet -e .; }
 
 # ---- 5. download model (SHA256 verified) ----
 echo "[5/5] Downloading model weights (~320 MB, SHA256 verified) ..."

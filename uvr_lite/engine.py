@@ -18,7 +18,6 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import soxr
 import torch
 
 # msst/ 采用 `from models.xxx import ...` / `from utils.xxx import ...` 绝对导入，
@@ -36,12 +35,10 @@ from utils.model_utils import (  # noqa: E402
 )
 from utils.settings import get_model_from_config  # noqa: E402
 
+from .audio_io import load_audio  # noqa: E402
 from .download import config_path, ensure_model  # noqa: E402
+from .errors import CancelledError  # noqa: E402  re-export（旧调用方兼容）
 from .models import DEFAULT_MODEL, get_model_info  # noqa: E402
-
-
-class CancelledError(Exception):
-    """用户请求取消当前分离任务（进度回调返回 False 时抛出）。"""
 
 
 def pick_device(device: str) -> str:
@@ -104,34 +101,11 @@ def _warmup(model, config, device: str) -> None:
 
 
 def _load_audio(path: Path, sr: int) -> np.ndarray:
-    """解码音频为 (channels, samples) float32 并重采样到 sr。
+    """兼容旧调用点 / 测试 monkeypatch 的薄封装：解码并重采样为 (channels, samples)。
 
-    主路径 soundfile（flac/wav/ogg/mp3 原生解码，libsndfile）；
-    m4a 等 libsndfile 不支持的格式回退 audioread（需系统 ffmpeg）。
-    替代 librosa.load，连带省掉 scipy/numba/llvmlite 等约 320MB 依赖。
+    实现在 uvr_lite.audio_io（与合成路径共用同一条解码链路）。
     """
-    try:
-        data, orig_sr = sf.read(str(path), dtype="float32", always_2d=True)
-    except RuntimeError:
-        data, orig_sr = _read_audioread(path)
-    if orig_sr != sr:
-        # soxr 的 2D 语义为 (samples, channels)，与 soundfile/audioread 布局一致
-        data = soxr.resample(data, orig_sr, sr, quality="HQ")
-    return data.T  # (frames, channels) -> (channels, frames)
-
-
-def _read_audioread(path: Path):
-    """audioread 兜底解码（int16 PCM → float32，与 librosa 的 audioread 路径一致）。"""
-    import audioread
-
-    with audioread.audio_open(str(path)) as af:
-        orig_sr = af.samplerate
-        ch = af.channels
-        blocks = [
-            np.frombuffer(b, dtype=np.int16).reshape(-1, ch).astype(np.float32) / 32768.0
-            for b in af
-        ]
-    return np.concatenate(blocks, axis=0), orig_sr
+    return load_audio(path, sr)[0]
 
 
 class Separator:

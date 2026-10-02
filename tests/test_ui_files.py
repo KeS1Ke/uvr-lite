@@ -162,7 +162,7 @@ def test_file_done_in_range_marks_item_ok(qapp, win, tmp_path):
 
 # ---------- 阶段中文名单一来源（uvr_lite/ui/progress.py） ----------
 
-_PHASES = ["decode", "infer", "chunk", "tta", "write"]
+_PHASES = ["decode", "infer", "chunk", "tta", "mix", "write"]
 
 
 def test_phase_labels_live_in_progress_module():

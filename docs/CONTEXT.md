@@ -1,5 +1,7 @@
 # uvr-lite 领域术语表（CONTEXT）
 
+轻量级人声/伴奏分离与合成工具：分离把整曲拆成人声/伴奏，合成（mix）再把两者合回整曲。
+
 > 本项目术语表，随实现演进维护。UI 外包装相关术语见 ADR-001。
 
 ## 核心术语
@@ -7,16 +9,20 @@
 | 术语 | 定义 |
 |---|---|
 | **分离（separate）** | 将一段混合音频拆成两条音轨：人声（vocals）与伴奏（instrumental）。伴奏 = 原曲 − 人声（数学无损）。 |
+| **合成（mix）** | 分离的逆运算：把分离出的人声与伴奏重新合成为整曲。默认精确求和（同源产物可近似无损还原），可选按轨增益与峰值归一化（-1 dBFS）；纯 DSP，不加载模型、不 import torch。进度 phase 为 `decode` / `mix` / `write`，取消抛 `CancelledError` 并清理半成品。 |
+| **配对（stem pairing）** | 按文件名自动识别人声/伴奏并成对：`-vocals` / `_vocals` 对应人声，`-instrumental` / `_instrumental` / `-inst` / `_inst` 对应伴奏（大小写不敏感、扩展名可不同，另兼容空格分隔）。`pair_stems()` 结果分**已配对 / 未配对 / 忽略**三类；同基名多候选只配最早的一对，其余进未配对，不静默挑文件。 |
 | **模型（model）** | 训练好的分离网络权重，当前分发 fp16 safetensors（`*.lite.safetensors`；历史 `.ckpt` 格式仍可加载，engine 按扩展名分流）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
 | **引擎（engine）** | `uvr_lite/engine.py` 的分离执行层，提供 `separate_file()` 纯函数接口（输入/输出/参数）。 |
-| **进度回调（progress_callback）** | 引擎向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。 |
-| **取消（cancel）** | 用户中止当前任务。引擎收到回调返回 `False` 后抛 `CancelledError`；UI 清理半成品输出。 |
-| **半成品清理** | 取消后删除未写完的输出文件（`*-vocals.*` / `*-instrumental.*`），不留残缺文件。 |
-| **任务队列（queue）** | UI 中待处理音频的列表。**两种添加方式**：选择文件（多选/拖拽）或选择输入文件夹（扫描其中常见音频格式 mp3/flac/wav/ogg/m4a，默认不递归、去重追加）。按添加顺序逐个处理；单文件失败跳过继续，结束汇总"成功 N / 失败 M"。处理开始前先做一次格式预检：无法识别为音频的列表项标 ✗「（格式不支持）」，留在列表中但不进入本次队列；全部都无法识别时不启动任务。 |
+| **audio_io** | `uvr_lite/audio_io.py`：解码 / 重采样 / 文件扫描的共享层（soundfile + soxr，audioread 兜底 m4a），engine 与 mix 共用且不 import torch；`engine._load_audio` 保留为薄封装兼容旧调用点。 |
+| **进度回调（progress_callback）** | 分离 / 合成向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。 |
+| **取消（cancel）** | 用户中止当前任务。分离 / 合成收到回调返回 `False` 后抛 `CancelledError`（`uvr_lite/errors.py` 共享，engine 继续 re-export 兼容旧调用）；UI 清理半成品输出。 |
+| **半成品清理** | 取消后删除未写完的输出文件（`*-vocals.*` / `*-instrumental.*`，合成 `*-mix.*`），不留残缺文件。 |
+| **任务队列（queue）** | UI 中待处理音频的列表。**两种添加方式**：选择文件（多选/拖拽）或选择输入文件夹（扫描其中常见音频格式 mp3/flac/wav/ogg/m4a，默认不递归、去重追加）。拖放与「选择文件夹」共用同一条扫描路径：拖入的每一项按「目录 → 扫顶层音频 / 文件 → 后缀过滤」分流，跨文件夹去重后追加。按添加顺序逐个处理；单文件失败跳过继续，结束汇总"成功 N / 失败 M"。处理开始前先做一次格式预检：无法识别为音频的列表项标 ✗「（格式不支持）」，留在列表中但不进入本次队列；全部都无法识别时不启动任务。 |
 | **ETA** | 预计剩余时间，按已完成文件的平均速度线性估算。 |
 | **UI 外包装** | 面向非专业用户的 PySide6 桌面界面，进程内调用引擎，不改变 CLI 行为。 |
 | **全量安装包** | Inno Setup 7 制作的标准安装程序（`installer/install.iss`）：代码快照 + 内置绿色 Python（含全部依赖）+ CPU torch + fp16 模型权重内置，安装即用。**2026-09 修订（半在线）**：CUDA torch **不在包内**，由默认不勾选的附加任务「下载 CUDA 推理引擎（约 3.3 GB，需联网）」在安装过程中联网拉取（ExternalSize 3.27GB，带 SHA256 校验与进度页），也可事后在应用内或 CLI `uvr-lite install-cuda` 补装。 |
 | **推理引擎切换** | `torch_cpu/` 与（按需安装后才存在的）`torch_cuda/` 两套独立 torch，应用内选择（自动/CPU/CUDA）写 `torch.ini`，启动时 `uvr_lite/__init__.py` 把对应目录插入 sys.path（重启生效）。**2026-09 修订**：随包内置的只有 CPU torch，`torch_cuda/` 需上述下载后才存在。 |
+| **CUDA 引擎环境门槛** | CUDA wheel 只有一个实测版本（`torch-2.7.1+cu128-cp312-cp312-win_amd64.whl`，cp312/win_amd64），而包声明 `requires-python >= 3.10`。故 `download.cuda_engine_requirements()` 在**下载前**校验：仅 **64 位 x64 Windows + Python 3.12** 放行（`sys.platform=="win32"`、`platform.machine()` 为 x64、指针 8 字节、ABI 标签匹配），32 位解释器 / ARM64 Windows / 非 Windows 均拒绝；不匹配抛 `CudaEngineUnsupportedError`（完整文案含「装官方安装包」或「用 PyPI 装 cu128 torch」两条出路），UI 侧 `cuda_engine_supported()`/`cuda_engine_block_reason()` 据此禁用下载按钮（label 首句、tooltip 完整文案）。**已安装（`torch_cuda/` 就绪）优先直接返回，不再做环境门槛**；标签从 wheel 文件名解析（单一来源）。不按 ABI 动态换 wheel——每个 ABI 都需要一份实测 SHA256 与字节数。 |
 | **绿色 Python** | python-build-standalone 发行版，打包机下载后与依赖一起打进安装包；运行时直接使用（无 venv）。 |
 | **单安装目录** | 全部组件（代码 + Python + torch_cpu（勾选后追加 torch_cuda）+ 模型 + logs）位于用户选择的一个目录内；卸载 = 控制面板卸载（删目录 + 快捷方式 + 注册表）。 |
 | **快捷方式** | 安装后生成桌面 + 开始菜单两处入口（♪ 图标），指向 `python\pythonw.exe -m uvr_lite.ui`（WorkingDir=app）。 |
@@ -28,8 +34,12 @@
 | 路径 | 角色 |
 |---|---|
 | `uvr_lite/engine.py` | 分离引擎（进度回调 + 取消） |
+| `uvr_lite/mix.py` | 合成引擎 `combine()`：人声＋伴奏回混，纯 DSP（不加载模型、不 import torch） |
+| `uvr_lite/stems.py` | 音轨配对（`pair_stems` / `find_stem_pairs` / `split_stem`），CLI 批量与 UI 合成页共用 |
+| `uvr_lite/audio_io.py` | 解码/重采样/扫描共享层（engine 与 mix 共用，不 import torch） |
+| `uvr_lite/errors.py` | 共享 `CancelledError`（engine 与 mix 共用，engine re-export 兼容旧调用） |
 | `uvr_lite/__init__.py` | 版本 + torch 二进制切换（torch.ini / UVR_TORCH） |
-| `uvr_lite/ui/` | UI 包（主窗口、推理线程、设备切换） |
+| `uvr_lite/ui/` | UI 包（主窗口、分离/合成 Worker、设备切换、功能页切换） |
 | `installer/install.iss` | Inno Setup 安装脚本（base 文件复制 + 可选 CUDA 引擎联网下载 + 快捷方式 + 卸载清理） |
 | `installer/copy_app.py` | 打包用代码快照复制（排除规则） |
 | `scripts/build_installer.py` | 打包脚本：组装 bundle（Python+依赖+CPU torch+模型）→ ISCC 编译出单个 `uvr-lite-setup_v{version}.exe`（2026-09 修订：不再有 cpu/full 双变体） |
@@ -38,3 +48,4 @@
 
 - ADR-001：UI 外包装（UI/引擎接口/分发全套决策，24 条 + 5 项默认）；2026-08-03 更新：分发改为 **Inno Setup 全量安装包**（内置绿色 Python 3.12 + CPU/CUDA 双 torch + fp16 模型，用户免联网下载；此前 PyInstaller 向导因收集 bug 弃用、NSIS 因 ~2GB 上限弃用）。**该「双 torch 内置」形态已于 2026-09 废止（CUDA torch 降为可勾选联网下载），见下一条**
 - 2026-09 修订（同一条目的演变）：改为 **单包半在线**——只出单个 `uvr-lite-setup_v{version}.exe`，base 内置 CPU torch + fp16 模型离线可用，CUDA 引擎降为安装时可勾选的联网下载任务（或事后 `uvr-lite install-cuda` 补装），故不再有 cpu/full 两个安装包变体；同步补记「运行日志」条目
+- 2026-10（0.1.7）：新增**音轨合成**（分离的逆运算）。CLI `uvr-lite mix`：单对 `mix VOCALS INSTRUMENTAL -o DIR`，或 `mix --batch DIR` 自动配对批量；参数 `--format/--pcm/--vocal-gain/--inst-gain/--normalize`。UI 底部「功能」下拉在「人声/伴奏分离」与「音轨合成（人声＋伴奏）」两页（QStackedWidget，不增加窗口最小高度）间切换，合成页拖入文件/文件夹自动配对并以 ✓/✗ 标注。合成复用分离的进度/取消契约（phase decode/mix/write，`CancelledError` 由 `errors.py` 共享），解码/重采样/扫描抽到 `audio_io` 共享层，不新增依赖

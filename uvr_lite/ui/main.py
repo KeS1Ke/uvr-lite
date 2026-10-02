@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -41,13 +42,27 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..download import cuda_torch_installed, model_file, repo_root
+from ..download import (
+    cuda_engine_block_reason,
+    cuda_engine_supported,
+    cuda_torch_installed,
+    model_file,
+    repo_root,
+)
 from ..log import ensure_log_dir, get_logger, log_exception, log_hint, log_path
 from ..models import MODEL_REGISTRY
+from ..stems import StemPair, find_stem_pairs, pair_stems, split_stem
 from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
 from .progress import PHASE_CN, estimate_eta, summary_text
 from .theme import apply as apply_theme
-from .worker import CudaTorchWorker, ModelDownloadWorker, SeparationParams, SeparationWorker
+from .worker import (
+    CombineParams,
+    CombineWorker,
+    CudaTorchWorker,
+    ModelDownloadWorker,
+    SeparationParams,
+    SeparationWorker,
+)
 
 _ICON = Path(__file__).resolve().parent / "resources" / "uvr-lite.ico"
 
@@ -76,6 +91,11 @@ MODEL_LABELS = {
 # 全量安装包含 CPU/CUDA 两套 torch，应用内选择；mps 仅 macOS 无意义故不列出
 DEVICE_CHOICES = ["auto", "cpu", "cuda"]
 FORMAT_CHOICES = ["auto", "flac", "wav"]
+
+# 功能模式：分离（引擎+模型）/ 合成（人声＋伴奏回混，纯 DSP）
+MODE_SEPARATE = 0
+MODE_COMBINE = 1
+MODE_CHOICES = ["人声/伴奏分离", "音轨合成（人声＋伴奏）"]
 
 # 列表项状态前缀（显示在文件名前）
 _PREFIX_PENDING = "⏳ "
@@ -138,8 +158,22 @@ class MainWindow(QMainWindow):
         self._paths: list[Path] = []
         self._tray: QSystemTrayIcon | None = None
         self._tray_menu: QMenu | None = None
+        self._busy = False
+        self._worker = None
+        self._thread = None
+        # 合成（人声＋伴奏回混）状态：文件池 → 每次重建时自动配对
+        self._mix_files: list[Path] = []
+        self._mix_pairs: list[StemPair] = []
+        self._mix_unmatched: list[Path] = []
+        self._mix_row_paths: list[list[Path]] = []
+        self._mix_queue: list[StemPair] = []
+        self._mix_worker = None
+        self._mix_thread = None
+        self._mix_failed_names: list[str] = []
+        self._mix_file_times: list[float] = []
+        self._mix_out_dir = ""
         # 版本号放标题：界面里没有别的出口（cli --version 用户看不到），标题截图即报障信息
-        self.setWindowTitle(f"uvr-lite 人声/伴奏分离 {__version__}")
+        self.setWindowTitle(f"uvr-lite 人声分离/合成 {__version__}")
         self.setWindowIcon(QIcon(str(_ICON)))
         self.setAcceptDrops(True)
         self.resize(760, 680)
@@ -172,6 +206,14 @@ class MainWindow(QMainWindow):
         root.addWidget(self.banner)
         self.btn_download.clicked.connect(self._start_download)
 
+        # --- 功能页（分离 / 合成）：QStackedWidget 切换，不占额外高度 ---
+        self.stack = QStackedWidget(central)
+        self.sep_page = QWidget(self.stack)
+        sep_lay = QVBoxLayout(self.sep_page)
+        sep_lay.setContentsMargins(0, 0, 0, 0)
+        sep_lay.setSpacing(8)
+        self.mix_page = QWidget(self.stack)
+
         # --- 文件列表 ---
         self.file_box = QGroupBox("待处理音频（可拖拽文件到此处）", central)
         self.file_box.setObjectName("files")
@@ -200,7 +242,7 @@ class MainWindow(QMainWindow):
         self.btn_add_folder.clicked.connect(self._add_folder_dialog)
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear_list)
-        root.addWidget(self.file_box, 1)
+        sep_lay.addWidget(self.file_box, 1)
 
         # --- 模型与参数 ---
         param_box = QGroupBox("参数", central)
@@ -236,7 +278,7 @@ class MainWindow(QMainWindow):
         form.addRow("批大小（低显存设 1）", self.spin_batch)
         form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
         form.addRow("", self.check_tta)
-        root.addWidget(param_box)
+        sep_lay.addWidget(param_box)
 
         # --- 推理引擎（CPU/CUDA torch）：单包只含 CPU，CUDA 可选下载 ---
         engine_box = QGroupBox("推理引擎", central)
@@ -251,7 +293,7 @@ class MainWindow(QMainWindow):
         engine_row.addWidget(self.cuda_progress)
         engine_row.addWidget(self.btn_cuda)
         engine_row.addStretch(1)
-        root.addWidget(engine_box)
+        sep_lay.addWidget(engine_box)
         self.btn_cuda.clicked.connect(self._start_cuda_download)
         self._refresh_engine_status()
 
@@ -264,16 +306,31 @@ class MainWindow(QMainWindow):
         self.btn_out = QPushButton("选择…", out_box)
         out_row.addWidget(self.edit_out)
         out_row.addWidget(self.btn_out)
-        root.addWidget(out_box)
+        sep_lay.addWidget(out_box)
         self.btn_out.clicked.connect(self._choose_out_dir)
+
+        # --- 合成页（人声＋伴奏回混，纯 DSP 不加载模型）---
+        mix_lay = QVBoxLayout(self.mix_page)
+        mix_lay.setContentsMargins(0, 0, 0, 0)
+        mix_lay.setSpacing(8)
+        self._build_mix_page(mix_lay)
+        self.stack.addWidget(self.sep_page)
+        self.stack.addWidget(self.mix_page)
+        root.addWidget(self.stack, 1)
 
         # --- 操作区 ---
         action_row = QHBoxLayout()
+        self.label_mode = QLabel("功能", central)
+        self.combo_mode = QComboBox(central)
+        self.combo_mode.addItems(MODE_CHOICES)
+        self.combo_mode.setToolTip("分离：把歌曲拆成人声/伴奏；合成：把两者合回整曲")
         self.btn_start = QPushButton("开始分离", central)
         self.btn_start.setObjectName("primary")
         self.btn_cancel = QPushButton("取消", central)
         self.btn_cancel.setObjectName("quiet")
         self.btn_cancel.setEnabled(False)
+        action_row.addWidget(self.label_mode)
+        action_row.addWidget(self.combo_mode)
         action_row.addWidget(self.btn_start)
         action_row.addWidget(self.btn_cancel)
         action_row.addStretch(1)
@@ -309,19 +366,96 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
-        # 控件全部就绪后再挂模型状态联动
+        # 控件全部就绪后再挂联动（信号回调里会引用 btn_start/label_status 等）
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.combo_model.currentIndexChanged.connect(self._refresh_model_banner)
         self._refresh_model_banner()
         self._setup_tray()
 
+    def _build_mix_page(self, lay: QVBoxLayout) -> None:
+        """合成页：音轨列表（自动配对）+ 增益/格式参数 + 输出目录。"""
+        self.mix_file_box = QGroupBox(
+            "待合成音轨（人声＋伴奏，可拖拽或选择文件夹自动配对）", self.mix_page)
+        self.mix_file_box.setObjectName("files")
+        fl = QVBoxLayout(self.mix_file_box)
+        fl.setContentsMargins(12, 8, 12, 10)
+        fl.setSpacing(8)
+        self.mix_stack = QStackedWidget(self.mix_file_box)
+        self.mix_stack.setMinimumHeight(112)
+        self.mix_drop_hint = QLabel(
+            "把「人声」和「伴奏」文件或整个文件夹拖到这里\n"
+            "文件名以 -vocals / -instrumental 结尾时自动配对", self.mix_stack)
+        self.mix_drop_hint.setObjectName("dropHint")
+        self.mix_drop_hint.setAlignment(Qt.AlignCenter)
+        self.mix_list = ToggleSelectList(self.mix_stack)
+        self.mix_stack.addWidget(self.mix_drop_hint)
+        self.mix_stack.addWidget(self.mix_list)
+        fl.addWidget(self.mix_stack, 1)
+        btn_row = QHBoxLayout()
+        self.mix_btn_add_files = QPushButton("选择音轨…", self.mix_file_box)
+        self.mix_btn_add_folder = QPushButton("选择文件夹…", self.mix_file_box)
+        self.mix_btn_remove = QPushButton("移除所选", self.mix_file_box)
+        self.mix_btn_clear = QPushButton("清空", self.mix_file_box)
+        for b in (self.mix_btn_add_files, self.mix_btn_add_folder,
+                  self.mix_btn_remove, self.mix_btn_clear):
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
+        fl.addLayout(btn_row)
+        self.mix_btn_add_files.clicked.connect(self._mix_add_files_dialog)
+        self.mix_btn_add_folder.clicked.connect(self._mix_add_folder_dialog)
+        self.mix_btn_remove.clicked.connect(self._mix_remove_selected)
+        self.mix_btn_clear.clicked.connect(self._mix_clear_list)
+        lay.addWidget(self.mix_file_box, 1)
+
+        param_box = QGroupBox("合成参数", self.mix_page)
+        form = QFormLayout(param_box)
+        form.setContentsMargins(12, 8, 12, 10)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(6)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.spin_vocal_gain = QDoubleSpinBox(param_box)
+        self.spin_vocal_gain.setRange(0.0, 4.0)
+        self.spin_vocal_gain.setSingleStep(0.05)
+        self.spin_vocal_gain.setDecimals(2)
+        self.spin_vocal_gain.setValue(1.0)
+        self.spin_inst_gain = QDoubleSpinBox(param_box)
+        self.spin_inst_gain.setRange(0.0, 4.0)
+        self.spin_inst_gain.setSingleStep(0.05)
+        self.spin_inst_gain.setDecimals(2)
+        self.spin_inst_gain.setValue(1.0)
+        self.mix_combo_format = QComboBox(param_box)
+        self.mix_combo_format.addItems(FORMAT_CHOICES)
+        self.mix_combo_pcm = QComboBox(param_box)
+        self.mix_combo_pcm.addItems(["24", "16"])
+        self.check_normalize = QCheckBox("峰值归一化（防止相加爆音）", param_box)
+        form.addRow("人声音量", self.spin_vocal_gain)
+        form.addRow("伴奏音量", self.spin_inst_gain)
+        form.addRow("输出格式", self.mix_combo_format)
+        form.addRow("FLAC 位深", self.mix_combo_pcm)
+        form.addRow("", self.check_normalize)
+        lay.addWidget(param_box)
+
+        out_box = QGroupBox("输出文件夹", self.mix_page)
+        out_row = QHBoxLayout(out_box)
+        out_row.setContentsMargins(12, 8, 12, 10)
+        self.mix_edit_out = QLineEdit(out_box)
+        self.mix_edit_out.setPlaceholderText("未选择（默认：当前目录/output）")
+        self.mix_btn_out = QPushButton("选择…", out_box)
+        out_row.addWidget(self.mix_edit_out)
+        out_row.addWidget(self.mix_btn_out)
+        lay.addWidget(out_box)
+        self.mix_btn_out.clicked.connect(self._mix_choose_out_dir)
+
     # ---------- 文件列表操作 ----------
 
-    def _add_paths(self, paths: list[Path]) -> None:
+    def _add_paths(self, paths: list[Path]) -> int:
+        """去重追加路径并重建列表；返回本次新增条数（供调用方拼状态栏文案）。"""
         new = dedup_paths(self._paths + paths)
         added = len(new) - len(self._paths)
         self._paths = new
         self._rebuild_list()
         self.label_status.setText(f"已添加 {added} 个文件，共 {len(self._paths)} 个。")
+        return added
 
     def _rebuild_list(self) -> None:
         """按 self._paths 重建列表项（行与 _paths 一一对应，状态前缀保留基础名）。"""
@@ -354,11 +488,20 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(
             self, "选择输入文件夹（自动扫描其中音频）", str(self.settings.value("last_dir", "")))
         if folder:
-            found = scan_audio_files(Path(folder))
+            try:
+                found = scan_audio_files(Path(folder))
+            except OSError:
+                # 不可读目录：异常不能冒到 Qt 事件循环里被吞掉，用户会以为按钮没反应
+                self.label_status.setText(
+                    f"无法读取文件夹：{Path(folder).name}（权限不足？）。")
+                return
             if not found:
                 self.label_status.setText("该文件夹里没有找到音频文件（mp3/flac/wav/ogg/m4a）。")
                 return
-            self._add_paths(found)
+            added = self._add_paths(found)
+            if not added:
+                self.label_status.setText(
+                    f"共 {len(self._paths)} 个文件（无新增，已在列表中）。")
             self.settings.setValue("last_dir", str(Path(folder).resolve()))
 
     def _remove_selected(self) -> None:
@@ -377,6 +520,119 @@ class MainWindow(QMainWindow):
         if folder:
             self.edit_out.setText(folder)
 
+    # ---------- 合成列表操作（文件池 → 每次重建自动配对） ----------
+
+    def _mix_add_paths(self, paths: list[Path]) -> int:
+        """去重追加音轨并重建配对列表；返回新增条数（供调用方拼状态栏文案）。"""
+        new = dedup_paths(self._mix_files + paths)
+        added = len(new) - len(self._mix_files)
+        self._mix_files = new
+        self._mix_rebuild_list()
+        return added
+
+    def _mix_rebuild_list(self) -> None:
+        """按当前文件池重新配对并重建列表：成对的在前，缺另一半的在后。"""
+        result = pair_stems(self._mix_files)
+        self._mix_pairs = result.pairs
+        self._mix_unmatched = result.unmatched
+        self.mix_list.clear()
+        self._mix_row_paths = []
+        for pair in self._mix_pairs:
+            base = self._mix_pair_label(pair)
+            item = QListWidgetItem(f"{_PREFIX_OK}{base}", self.mix_list)
+            item.setData(Qt.UserRole, str(pair.vocals))
+            item.setData(Qt.UserRole + 1, base)  # 无前缀原文，用于状态切换
+            self._mix_row_paths.append([pair.vocals, pair.instrumental])
+        for p in self._mix_unmatched:
+            split = split_stem(p)
+            missing = "伴奏" if split is not None and split[1] == "vocals" else "人声"
+            base = f"{p.name}（缺少{missing}）"
+            item = QListWidgetItem(f"{_PREFIX_BAD}{base}", self.mix_list)
+            item.setData(Qt.UserRole, str(p))
+            item.setData(Qt.UserRole + 1, base)
+            self._mix_row_paths.append([p])
+        self.mix_stack.setCurrentWidget(
+            self.mix_list if self._mix_files else self.mix_drop_hint)
+
+    @staticmethod
+    def _mix_pair_label(pair: StemPair) -> str:
+        split = split_stem(pair.vocals)
+        base = split[0] if split is not None else pair.vocals.stem
+        return f"{base}（人声 {pair.vocals.name} ＋ 伴奏 {pair.instrumental.name}）"
+
+    def _set_mix_item_state(self, row: int, prefix: str, note: str = "") -> None:
+        """切换合成列表某一行的状态前缀（保留无前缀原文，避免前缀叠加）。"""
+        if not (0 <= row < self.mix_list.count()):
+            return
+        item = self.mix_list.item(row)
+        base = item.data(Qt.UserRole + 1) or item.text()
+        item.setText(f"{prefix}{base}{note}")
+
+    def _mix_report_added(self, added: int) -> None:
+        if added:
+            self.label_status.setText(
+                f"已添加 {added} 个音轨文件，已配对 {len(self._mix_pairs)} 组。")
+        else:
+            self.label_status.setText(
+                f"无新增音轨（已在列表中），当前已配对 {len(self._mix_pairs)} 组。")
+
+    def _mix_add_files_dialog(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择音轨文件（人声与伴奏）",
+            str(self.settings.value("mix_last_dir", "")),
+            "音频文件 (*.mp3 *.flac *.wav *.ogg *.m4a);;所有文件 (*)",
+        )
+        if files:
+            added = self._mix_add_paths([Path(f) for f in files])
+            self._mix_report_added(added)
+            self.settings.setValue("mix_last_dir", str(Path(files[0]).resolve().parent))
+
+    def _mix_add_folder_dialog(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择文件夹（自动配对 *-vocals / *-instrumental）",
+            str(self.settings.value("mix_last_dir", "")))
+        if not folder:
+            return
+        try:
+            result = find_stem_pairs(Path(folder))
+        except OSError:
+            # 不可读目录不能把异常冒到 Qt 事件循环（与分离页同款处理）
+            self.label_status.setText(
+                f"无法读取文件夹：{Path(folder).name}（权限不足？）。")
+            return
+        if not result.pairs and not result.unmatched:
+            self.label_status.setText(
+                "该文件夹里没有找到分离音轨（*-vocals / *-instrumental）。")
+            return
+        paths = (
+            [p.vocals for p in result.pairs]
+            + [p.instrumental for p in result.pairs]
+            + list(result.unmatched)
+        )
+        added = self._mix_add_paths(paths)
+        self.settings.setValue("mix_last_dir", str(Path(folder).resolve()))
+        self._mix_report_added(added)
+
+    def _mix_remove_selected(self) -> None:
+        rows = sorted({i.row() for i in self.mix_list.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        drop: set[Path] = set()
+        for r in rows:
+            drop.update(self._mix_row_paths[r])
+        self._mix_files = [p for p in self._mix_files if p not in drop]
+        self._mix_rebuild_list()
+
+    def _mix_clear_list(self) -> None:
+        self._mix_files.clear()
+        self._mix_rebuild_list()
+
+    def _mix_choose_out_dir(self) -> None:
+        start = self.mix_edit_out.text() or str(self.settings.value("mix_last_dir", ""))
+        folder = QFileDialog.getExistingDirectory(self, "选择输出文件夹", start)
+        if folder:
+            self.mix_edit_out.setText(folder)
+
     # ---------- 拖拽 ----------
 
     def dragEnterEvent(self, event) -> None:
@@ -389,15 +645,118 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def dropEvent(self, event) -> None:
+        """按当前功能页分流拖入项：分离页进分离队列，合成页进配对池。
+
+        每一项分流：目录走 scan_audio_files（与「选择文件夹」同一条路），
+        文件走 is_audio 过滤。修前只收 is_file() 的项，拖入目录既不扫描也无
+        反馈——用户看不出是没处理还是程序坏了。现在目录与文件混拖也能全部入列
+        （跨文件夹去重交给 _add_paths）。非本地 URL（http/ftp 等）的
+        toLocalFile() 是空串，Path("") 会被当成当前目录扫进去，必须先按
+        isLocalFile() 过滤掉。
+        """
         self._set_drop_target(False)
-        dropped = [Path(u.toLocalFile()) for u in event.mimeData().urls()]
-        files = [p for p in dropped if p.is_file() and is_audio(p)]
-        self._add_paths(files)
+        if self.stack.currentWidget() is self.mix_page:
+            self._drop_to_mix(event)
+            return
+        files, empty_dirs, failed_dirs, ignored, local_items = self._scan_dropped(event)
+
+        parts: list[str] = []
+        if files:
+            # 列表为空时不调 _add_paths：否则会先写「已添加 0 个文件」噪音。
+            # 非空时用返回值拼文案，全重复（added=0）要给「无新增」说明。
+            added = self._add_paths(files)
+            if added:
+                parts.append(f"已添加 {added} 个文件，共 {len(self._paths)} 个。")
+            else:
+                parts.append(f"共 {len(self._paths)} 个文件（无新增，已在列表中）。")
+        if empty_dirs:
+            names = "、".join(d.name for d in empty_dirs[:3])
+            more = f" 等（共 {len(empty_dirs)} 个）" if len(empty_dirs) > 3 else ""
+            parts.append(f"文件夹里没有找到音频（mp3/flac/wav/ogg/m4a）：{names}{more}。")
+        if failed_dirs:
+            names = "、".join(d.name for d in failed_dirs[:3])
+            more = f" 等（共 {len(failed_dirs)} 个）" if len(failed_dirs) > 3 else ""
+            parts.append(f"无法读取文件夹：{names}{more}（权限不足？）。")
+        if ignored:
+            parts.append(f"已忽略 {ignored} 个非音频文件。")
+        if not parts and local_items:
+            parts.append("没有可添加的音频文件（支持 mp3/flac/wav/ogg/m4a）。")
+        if parts:
+            self.label_status.setText("".join(parts))
+
+    def _scan_dropped(self, event):
+        """拖放项分流（分离/合成共用）：返回 (文件, 空目录, 不可读目录, 忽略数, 本地项数)。"""
+        files: list[Path] = []
+        empty_dirs: list[Path] = []
+        failed_dirs: list[Path] = []
+        ignored = 0
+        local_items = 0
+        for u in event.mimeData().urls():
+            if not u.isLocalFile() or not u.toLocalFile():
+                continue  # 非本地 URL 直接跳过：不计入任何扫描，也不报「没有音频」
+            local_items += 1
+            p = Path(u.toLocalFile())
+            if p.is_dir():
+                try:
+                    found = scan_audio_files(p)
+                except OSError:
+                    # 不可读目录（PermissionError 等）：原先异常冲出 dropEvent 被
+                    # Qt 打印后吞掉，用户毫无反馈——审计缺陷的原始症状
+                    failed_dirs.append(p)
+                    continue
+                if found:
+                    files.extend(found)
+                else:
+                    empty_dirs.append(p)
+            elif p.is_file():
+                if is_audio(p):
+                    files.append(p)
+                else:
+                    ignored += 1
+        return files, empty_dirs, failed_dirs, ignored, local_items
+
+    def _drop_to_mix(self, event) -> None:
+        """合成页拖放：收集音频后交配对池，并给状态栏反馈。"""
+        files, empty_dirs, failed_dirs, ignored, local_items = self._scan_dropped(event)
+        parts: list[str] = []
+        if files:
+            added = self._mix_add_paths(files)
+            if added:
+                parts.append(f"已添加 {added} 个音轨文件。")
+            else:
+                parts.append("无新增音轨（已在列表中）。")
+            parts.append(f"已配对 {len(self._mix_pairs)} 组。")
+        if empty_dirs:
+            names = "、".join(d.name for d in empty_dirs[:3])
+            more = f" 等（共 {len(empty_dirs)} 个）" if len(empty_dirs) > 3 else ""
+            parts.append(f"文件夹里没有找到音频（mp3/flac/wav/ogg/m4a）：{names}{more}。")
+        if failed_dirs:
+            names = "、".join(d.name for d in failed_dirs[:3])
+            more = f" 等（共 {len(failed_dirs)} 个）" if len(failed_dirs) > 3 else ""
+            parts.append(f"无法读取文件夹：{names}{more}（权限不足？）。")
+        if ignored:
+            parts.append(f"已忽略 {ignored} 个非音频文件。")
+        if not parts and local_items:
+            parts.append("没有可添加的音频文件（支持 mp3/flac/wav/ogg/m4a）。")
+        if parts:
+            self.label_status.setText("".join(parts))
 
     def _set_drop_target(self, active: bool) -> None:
-        self.file_box.setProperty("dragging", "true" if active else "false")
-        self.file_box.style().unpolish(self.file_box)
-        self.file_box.style().polish(self.file_box)
+        box = (self.mix_file_box
+               if self.stack.currentWidget() is self.mix_page else self.file_box)
+        box.setProperty("dragging", "true" if active else "false")
+        box.style().unpolish(box)
+        box.style().polish(box)
+
+    def _on_mode_changed(self, index: int) -> None:
+        """功能页切换：内容、开始按钮文案与状态提示一起换。"""
+        combine = index == MODE_COMBINE
+        self.stack.setCurrentWidget(self.mix_page if combine else self.sep_page)
+        self.btn_start.setText("开始合成" if combine else "开始分离")
+        if not self._busy:
+            self.label_status.setText(
+                "就绪。添加人声与伴奏（或选择文件夹自动配对）后点击开始合成。"
+                if combine else "就绪。添加音频文件后即可开始。")
 
     # ---------- 参数记忆 ----------
 
@@ -416,6 +775,16 @@ class MainWindow(QMainWindow):
         out = s.value("out_dir", "")
         if out:
             self.edit_out.setText(str(out))
+        # 合成页参数（含上次所在功能页）
+        self.combo_mode.setCurrentIndex(int(s.value("mode", MODE_SEPARATE)))
+        self._select_data(self.mix_combo_format, s.value("mix_format", "auto"))
+        self._select_data(self.mix_combo_pcm, str(s.value("mix_pcm", "24")))
+        self.spin_vocal_gain.setValue(float(s.value("mix_vocal_gain", 1.0)))
+        self.spin_inst_gain.setValue(float(s.value("mix_inst_gain", 1.0)))
+        self.check_normalize.setChecked(_settings_flag(s.value("mix_normalize", False)))
+        mix_out = s.value("mix_out_dir", "")
+        if mix_out:
+            self.mix_edit_out.setText(str(mix_out))
 
     def _save_settings(self) -> None:
         s = self.settings
@@ -429,6 +798,13 @@ class MainWindow(QMainWindow):
         s.setValue("tta", self.check_tta.isChecked())
         s.setValue("minimize_to_tray", self.check_minimize_tray.isChecked())
         s.setValue("out_dir", self.edit_out.text())
+        s.setValue("mode", self.combo_mode.currentIndex())
+        s.setValue("mix_format", self.mix_combo_format.currentText())
+        s.setValue("mix_pcm", self.mix_combo_pcm.currentText())
+        s.setValue("mix_vocal_gain", self.spin_vocal_gain.value())
+        s.setValue("mix_inst_gain", self.spin_inst_gain.value())
+        s.setValue("mix_normalize", self.check_normalize.isChecked())
+        s.setValue("mix_out_dir", self.mix_edit_out.text())
 
     @staticmethod
     def _select_data(combo: QComboBox, value) -> None:
@@ -526,16 +902,30 @@ class MainWindow(QMainWindow):
     # ---------- CUDA 引擎下载 ----------
 
     def _refresh_engine_status(self) -> None:
-        """按安装状态刷新「推理引擎」区：已装 / 可下载。"""
+        """按安装状态刷新「推理引擎」区：已装 / 可下载 / 当前环境不支持。
+
+        平台不匹配时（内置 wheel 只有 cp312/win_amd64）不装也不报错的静默态，
+        而是禁用按钮 + 直说原因——用户点下去才在 worker 线程里看到错误，等于
+        白等一趟（见 download.cuda_engine_requirements）。
+        """
         if cuda_torch_installed():
             self.label_engine.setText("CUDA 引擎已安装 ✓（设备选「自动」将优先 GPU 加速）")
             self.btn_cuda.setText("已安装")
             self.btn_cuda.setEnabled(False)
+        elif not cuda_engine_supported():
+            reason = cuda_engine_block_reason()
+            # 状态栏一行只放首句；完整文案（含「怎么办」①②）进 tooltip
+            self.label_engine.setText(
+                f"当前环境不支持 CUDA 引擎 — {reason.split('。')[0]}。")
+            self.btn_cuda.setText("不可用")
+            self.btn_cuda.setEnabled(False)
+            self.btn_cuda.setToolTip(reason)
         else:
             self.label_engine.setText(
                 "CUDA 引擎未安装 — 下载约 3.3 GB 后可用 GPU 加速（NVIDIA 显卡）")
             self.btn_cuda.setText("下载 CUDA 引擎")
             self.btn_cuda.setEnabled(True)
+            self.btn_cuda.setToolTip("")
 
     def _start_cuda_download(self) -> None:
         self._cuda_worker = CudaTorchWorker(repo_root())
@@ -591,6 +981,9 @@ class MainWindow(QMainWindow):
     # ---------- 任务控制 ----------
 
     def _start_clicked(self) -> None:
+        if self.combo_mode.currentIndex() == MODE_COMBINE:
+            self._mix_start_clicked()
+            return
         if not self._paths:
             QMessageBox.information(self, "提示", "请先添加音频文件（选择文件/文件夹或拖拽）。")
             return
@@ -662,11 +1055,62 @@ class MainWindow(QMainWindow):
         self.label_status.setText("准备中…")
         self._thread.start()
 
+    def _mix_start_clicked(self) -> None:
+        """合成任务：校验有配对，构建 CombineWorker（不加载模型）。"""
+        self._mix_rebuild_list()
+        if not self._mix_pairs:
+            if self._mix_files:
+                QMessageBox.information(
+                    self, "没有可配对的音轨",
+                    "列表中没有成对的人声＋伴奏。\n"
+                    "文件名以 -vocals 与 -instrumental（或 -inst）结尾时会自动配对。")
+            else:
+                QMessageBox.information(
+                    self, "提示", "请先添加人声与伴奏文件，或选择文件夹自动配对。")
+            return
+        out_dir = self.mix_edit_out.text().strip() or str(Path.cwd() / "output")
+        out_dir = str(Path(out_dir).resolve())
+        self._save_settings()
+
+        params = CombineParams(
+            vocal_gain=self.spin_vocal_gain.value(),
+            inst_gain=self.spin_inst_gain.value(),
+            fmt=self.mix_combo_format.currentText(),
+            pcm=f"PCM_{self.mix_combo_pcm.currentText()}",
+            normalize=self.check_normalize.isChecked(),
+        )
+        self._mix_queue = list(self._mix_pairs)
+        self._mix_worker = CombineWorker(
+            [(p.vocals, p.instrumental) for p in self._mix_queue], out_dir, params)
+        self._mix_thread = QThread(self)
+        self._mix_worker.moveToThread(self._mix_thread)
+        self._mix_thread.started.connect(self._mix_worker.run)
+        self._mix_worker.progress.connect(self._on_mix_progress)
+        self._mix_worker.file_done.connect(self._on_mix_file_done)
+        self._mix_worker.file_failed.connect(self._on_mix_file_failed)
+        self._mix_worker.all_finished.connect(self._on_mix_finished)
+        self._mix_thread.finished.connect(self._mix_thread.deleteLater)
+        self._mix_thread.finished.connect(self._mix_worker.deleteLater)
+
+        self._mix_out_dir = out_dir
+        self._mix_t_file = time.time()
+        self._mix_file_times = []
+        self._mix_failed_names = []
+        for idx in range(len(self._mix_queue)):
+            self._set_mix_item_state(idx, _PREFIX_PENDING)
+        self._set_busy(True)
+        self.progress.bar.setValue(0)
+        self.label_status.setText("准备中…")
+        self._mix_thread.start()
+
     def _cancel_clicked(self) -> None:
-        if self._worker is not None:
+        if self.combo_mode.currentIndex() == MODE_COMBINE:
+            if self._mix_worker is not None:
+                self._mix_worker.cancel()
+        elif self._worker is not None:
             self._worker.cancel()
-            self.btn_cancel.setEnabled(False)
-            self.label_status.setText("正在取消…")
+        self.btn_cancel.setEnabled(False)
+        self.label_status.setText("正在取消…")
 
     def _on_progress(self, phase, done, total, file_idx, file_total, file_pct) -> None:
         global_pct = int((file_idx + file_pct / 100.0) / max(1, file_total) * 100)
@@ -715,21 +1159,73 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._out_dir))
         self.label_status.setText("就绪。")
 
+    # ---------- 合成任务的进度 / 完成槽 ----------
+
+    def _on_mix_progress(self, phase, done, total, file_idx, file_total, file_pct) -> None:
+        global_pct = int((file_idx + file_pct / 100.0) / max(1, file_total) * 100)
+        self.progress.bar.setValue(global_pct)
+        eta = estimate_eta(self._mix_file_times, file_idx, file_total, file_pct / 100.0)
+        eta_txt = self._fmt_eta(eta) if eta is not None else "计算中…"
+        self.label_status.setText(
+            f"合成中 {file_idx + 1}/{file_total} · {PHASE_CN.get(phase, phase)}"
+            f" {file_pct}% · 预计剩余 {eta_txt}"
+        )
+
+    def _on_mix_file_done(self, file_idx, written) -> None:
+        self._mix_file_times.append(time.time() - self._mix_t_file)
+        self._mix_t_file = time.time()
+        self._set_mix_item_state(file_idx, _PREFIX_OK)
+
+    def _on_mix_file_failed(self, file_idx, error) -> None:
+        name = (self._mix_queue[file_idx].vocals.name
+                if 0 <= file_idx < len(self._mix_queue)
+                else f"未知音轨（队列索引 {file_idx}）")
+        self._mix_failed_names.append(name)
+        self._set_mix_item_state(file_idx, _PREFIX_BAD)
+        _log().warning("合成失败 %s: %s", name, error)
+        self.label_status.setText(f"{name} 合成失败，已跳过（{error[:80]}）")
+
+    def _on_mix_finished(self, ok, failed, cancelled) -> None:
+        self._set_busy(False)
+        msg = summary_text(ok, self._mix_failed_names)
+        if cancelled:
+            msg = f"已取消。{msg}"
+        if failed:
+            msg += log_hint()
+        box = QMessageBox(self)
+        box.setWindowTitle("合成完成" if not cancelled else "已取消")
+        box.setText(msg)
+        box.setIcon(QMessageBox.Information if not failed else QMessageBox.Warning)
+        btn_open = box.addButton("打开输出文件夹", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() is btn_open:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._mix_out_dir))
+        self.label_status.setText("就绪。")
+
     @staticmethod
     def _fmt_eta(seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
         return f"{m} 分 {s} 秒" if m else f"{s} 秒"
 
     def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
         for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
                   self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
                   self.spin_bigshifts, self.spin_batch, self.spin_overlap, self.check_tta,
-                  self.edit_out, self.btn_out):
+                  self.edit_out, self.btn_out,
+                  # 合成页与功能切换同样锁住，防止任务中切换导致按钮语义错位
+                  self.combo_mode,
+                  self.mix_btn_add_files, self.mix_btn_add_folder, self.mix_btn_remove,
+                  self.mix_btn_clear, self.mix_combo_format, self.mix_combo_pcm,
+                  self.spin_vocal_gain, self.spin_inst_gain, self.check_normalize,
+                  self.mix_edit_out, self.mix_btn_out):
             w.setEnabled(not busy)
         self.btn_start.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
         self.progress.setEnabled(busy)
         self.list_files.setEnabled(not busy)
+        self.mix_list.setEnabled(not busy)
 
     # ---------- 查看日志 ----------
 
@@ -827,6 +1323,10 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
             self._thread.quit()
             self._thread.wait(5000)
+        if getattr(self, "_mix_worker", None) is not None and self._mix_thread.isRunning():
+            self._mix_worker.cancel()
+            self._mix_thread.quit()
+            self._mix_thread.wait(5000)
         if getattr(self, "_dl_thread", None) is not None and self._dl_thread.isRunning():
             if getattr(self, "_dl_worker", None) is not None:
                 self._dl_worker.cancel()

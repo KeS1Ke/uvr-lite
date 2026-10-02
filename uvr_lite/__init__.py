@@ -1,4 +1,4 @@
-"""uvr-lite：轻量级人声/伴奏分离工具。
+"""uvr-lite：轻量级人声/伴奏分离与合成工具。
 
 推理引擎裁剪自 ZFTurbo Music-Source-Separation-Training（MIT），
 模型（BS-RoFormer / Mel-Band RoFormer）与 Ultimate Vocal Remover 同源。
@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 
 def _base_dir() -> Path:

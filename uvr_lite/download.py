@@ -12,14 +12,18 @@ import contextlib
 import hashlib
 import logging
 import os
+import platform
+import re
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from . import _base_dir
 from .models import MODEL_REGISTRY, get_model_info
@@ -423,10 +427,32 @@ def download_all() -> None:
 # 南大无 pytorch-wheels（404）。
 # SHA256 与字节数于打包时下载一次算得；install.iss 的 CUDA_SHA / ExternalSize
 # 硬编码同款，由 scripts/build_installer 打包前的一致性校验逐项核对防漂移。
+#
+# ABI 与平台：这份 wheel 只有 cp312 / win_amd64 一款，而 requires-python 声明
+# >= 3.10。修前不校验环境，Windows 上的 3.10/3.11 会照下 cp312 wheel，import
+# 时才炸（ABI 不匹配，3.3 GB 白花）；非 Windows 则下到一份根本装不上的
+# win_amd64 wheel。现在装前先过 cuda_engine_requirements() 门槛，把「当前环境
+# 拿不到这份 wheel」变成一条可行动的中文提示，而不是 3.3 GB 之后的 ImportError。
+# 支持多 ABI 需要为每个 ABI 各记一份实测 SHA256/字节数，故留待按需扩充。
 TORCH_CUDA_WHEEL = "torch-2.7.1+cu128-cp312-cp312-win_amd64.whl"
 TORCH_CUDA_SHA256 = "2bb8c05d48ba815b316879a18195d53a6472a03e297d971e916753f8e1053d30"
 # wheel 字节数（install.iss [Files] ExternalSize 的权威来源；本模块不读它）
 TORCH_CUDA_SIZE = 3273024349
+
+# wheel 文件名的解释器 ABI / 平台标签从文件名派生（单一来源）：手写重复常量
+# 迟早与 TORCH_CUDA_WHEEL 漂移，CudaEngineRequirements 的 property 也走同一解析。
+_WHEEL_TAGS_RE = re.compile(r"^.+-(?P<py>[^-]+)-(?P<abi>[^-]+)-(?P<plat>[^-]+)\.whl$")
+
+
+def _parse_wheel_tags(wheel: str) -> tuple[str, str]:
+    """从 wheel 文件名解析 (Python 标签, 平台标签)（PEP 427 文件名末三段）。"""
+    m = _WHEEL_TAGS_RE.match(wheel)
+    if m is None:
+        raise ValueError(f"无法从 wheel 文件名解析 ABI/平台标签: {wheel}")
+    return m.group("py"), m.group("plat")
+
+
+TORCH_CUDA_PY_TAG, TORCH_CUDA_PLATFORM_TAG = _parse_wheel_tags(TORCH_CUDA_WHEEL)
 # URL 中 "+" 用 %2B 编码：官方源（S3/CloudFront）对字面 + 返回 403，此前
 # 官方回退源一直是坏的；SJTU/阿里云对两种形式均可（与 install.iss 一致）。
 TORCH_CUDA_WHEEL_ENC = TORCH_CUDA_WHEEL.replace("+", "%2B")
@@ -435,6 +461,93 @@ TORCH_CUDA_URLS = [
     f"https://mirrors.sjtug.sjtu.edu.cn/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
     f"https://mirrors.aliyun.com/pytorch-wheels/cu128/{TORCH_CUDA_WHEEL_ENC}",
 ]
+
+
+class CudaEngineUnsupportedError(RuntimeError):
+    """当前环境与内置 CUDA wheel 的 ABI/平台不匹配（详见 cuda_engine_requirements）。"""
+
+
+class CudaEngineRequirements(NamedTuple):
+    """一份可用 CUDA wheel 的完整下载凭据。
+
+    把 wheel 名 + SHA256 + 字节数 + 来源 URL 收在一处：日后要支持第二个 ABI，
+    只需在这里多一张表，不必让 install_cuda_torch 里散落着 cp312 的假设。
+    """
+
+    wheel: str
+    sha256: str
+    size: int
+    urls: list[str]
+
+    @property
+    def py_tag(self) -> str:
+        return _parse_wheel_tags(self.wheel)[0]
+
+    @property
+    def platform_tag(self) -> str:
+        return _parse_wheel_tags(self.wheel)[1]
+
+
+# Windows 的 sys.platform 恒为 "win32"——32 位、x64 与 ARM64 都是；只看它会把
+# win_amd64 wheel 放行给用不了的环境。以下是 platform.machine() 在 x64 上
+# 各发行版的常见取值，统一转小写比较。
+_X64_MACHINES = {"amd64", "x86_64", "x64", "em64t"}
+
+
+def cuda_engine_requirements(platform_str: str | None = None,
+                             version_info=None,
+                             machine: str | None = None,
+                             pointer_size: int | None = None) -> CudaEngineRequirements:
+    """当前解释器能否使用内置 CUDA wheel；不能则抛 CudaEngineUnsupportedError。
+
+    四个参数默认读 sys.platform / sys.version_info / platform.machine() /
+    struct.calcsize("P")，仅为测试可注入而存在。
+
+    放行条件 = Windows（win32）+ x64 架构 + 64 位解释器（指针 8 字节）+
+    Python ABI 标签与 wheel 一致；缺一即以可行动的中文错误拦下。
+
+    拦截而非「按 ABI 换 wheel」的原因：换 wheel 就得为每个 ABI 各记一份实测
+    SHA256 与字节数（否则等于放弃完整性校验）。在补齐之前，让不匹配的环境
+    立刻拿到可行动的错误，好过下载 3.3 GB 之后才在 import 时崩。
+
+    报错文本要同时给出「缺什么」（ABI/平台/架构/位数）和「怎么办」（用 3.12
+    的安装包，或 PyPI 装对应 CUDA 版 torch），这是非专业用户唯一能照做的信息。
+    """
+    plat = sys.platform if platform_str is None else platform_str
+    version = sys.version_info if version_info is None else version_info
+    arch = platform.machine() if machine is None else machine
+    bits = struct.calcsize("P") if pointer_size is None else pointer_size
+
+    running_py_tag = f"cp{version[0]}{version[1]}"
+    if (plat == "win32" and arch.lower() in _X64_MACHINES and bits == 8
+            and running_py_tag == TORCH_CUDA_PY_TAG):
+        return CudaEngineRequirements(
+            wheel=TORCH_CUDA_WHEEL,
+            sha256=TORCH_CUDA_SHA256,
+            size=TORCH_CUDA_SIZE,
+            urls=list(TORCH_CUDA_URLS),
+        )
+
+    py_ver = f"{TORCH_CUDA_PY_TAG[2]}.{TORCH_CUDA_PY_TAG[3:]}"
+    need = [f"64 位 x64 Windows + Python {py_ver}（{TORCH_CUDA_PY_TAG}）"]
+    if plat != "win32":
+        need.append(f"当前系统不是 Windows（sys.platform={plat}）")
+    if arch.lower() not in _X64_MACHINES:
+        need.append(f"当前是 {arch} 架构（非 x64）")
+    if bits != 8:
+        need.append(f"当前是 {bits * 8} 位解释器")
+    if running_py_tag != TORCH_CUDA_PY_TAG:
+        need.append(f"当前是 Python {version[0]}.{version[1]}（{running_py_tag}）")
+    raise CudaEngineUnsupportedError(
+        "CUDA 推理引擎只提供 "
+        f"{TORCH_CUDA_PY_TAG}/{TORCH_CUDA_PLATFORM_TAG} 一款 wheel（{TORCH_CUDA_WHEEL}），"
+        f"当前环境不匹配：{'；'.join(need)}。"
+        "CPU 引擎不受影响，可直接用（速度较慢）。若要 GPU 加速，二选一："
+        f"① 装官方安装包（内置 Python {py_ver} + CPU torch，CUDA 引擎在安装时勾选下载）；"
+        f"② 在 Python {py_ver} 的 64 位 x64 Windows 环境里，"
+        "改用 PyPI 装对应 CUDA 版 torch："
+        "pip install torch --index-url https://download.pytorch.org/whl/cu128"
+    )
 
 
 def _wheel_cache_dir() -> Path:
@@ -448,6 +561,34 @@ def cuda_torch_installed(base: Path | None = None) -> bool:
     """CUDA 引擎是否已安装（{base}/torch_cuda/torch/__init__.py 存在）。"""
     base = Path(base) if base else repo_root()
     return (base / "torch_cuda" / "torch" / "__init__.py").exists()
+
+
+def cuda_engine_supported(platform_str: str | None = None, version_info=None,
+                          machine: str | None = None, pointer_size: int | None = None) -> bool:
+    """当前环境能否用内置 CUDA wheel（不抛异常版，给 UI 的可用性提示用）。"""
+    try:
+        cuda_engine_requirements(platform_str=platform_str, version_info=version_info,
+                                 machine=machine, pointer_size=pointer_size)
+    except CudaEngineUnsupportedError:
+        return False
+    return True
+
+
+def cuda_engine_block_reason(platform_str: str | None = None, version_info=None,
+                             machine: str | None = None, pointer_size: int | None = None) -> str:
+    """环境不匹配时的**完整**原因说明（含「怎么办」①②）；环境可用时返回空串。
+
+    UI 状态栏只截首句，完整文案进 tooltip。UI 不去跨模块 except 异常类：本模块
+    可能被 importlib.reload（测试里就有一处），reload 会重建类对象，UI 手里的旧
+    类引用再也抓不住新抛出的异常——表现为窗口构造直接失败。返回字符串没有这个
+    身份问题。
+    """
+    try:
+        cuda_engine_requirements(platform_str=platform_str, version_info=version_info,
+                                 machine=machine, pointer_size=pointer_size)
+    except CudaEngineUnsupportedError as e:
+        return str(e)
+    return ""
 
 
 def _prune_torch_install(dest: Path) -> None:
@@ -477,12 +618,24 @@ def _prune_torch_install(dest: Path) -> None:
 
 
 def install_cuda_torch(base: Path | None = None,
-                       progress_callback: Callable[[int, int], bool] | None = None) -> Path:
+                       progress_callback: Callable[[int, int], bool] | None = None,
+                       platform_str: str | None = None, version_info=None,
+                       machine: str | None = None, pointer_size: int | None = None) -> Path:
     """下载并安装 CUDA 推理引擎到 {base}/torch_cuda（与应用同目录）。
 
-    流程：已安装则直接返回 → _download（多段并发 + 断点续传 + 镜像回退）
-    → SHA256 校验（不匹配删缓存并报错）→ zipfile 解压（压缩字节进度，
-    与下载阶段同尺度，进度条不回跳）→ 裁剪 .lib/include/bin。
+    流程：已安装则直接返回 → 环境匹配检查 → _download（多段并发 + 断点续传
+    + 镜像回退）→ SHA256 校验（不匹配删缓存并报错）→ zipfile 解压（压缩字节
+    进度，与下载阶段同尺度，进度条不回跳）→ 裁剪 .lib/include/bin。
+
+    已安装判断在环境门槛之前：装好的引擎不因解释器换代/换机而被判不支持，
+    重复调用必须幂等返回，不再做任何环境检查。
+
+    环境检查在下载之前：wheel 只有 cp312/win_amd64 一款，不匹配时必须在花掉
+    3.3 GB 之前就报出可行动的错误（见 cuda_engine_requirements）。
+
+    platform_str / version_info / machine / pointer_size 只透传给环境检查，为测试
+    可注入而存在，生产路径一律走默认值（即真实 sys.platform / sys.version_info /
+    platform.machine() / struct.calcsize("P")）。
 
     progress_callback(done, total) 字节语义贯穿下载与解压阶段；返回 False
     视为取消（抛 InterruptedError；wheel 缓存保留，下次直接从解压开始）。
@@ -493,8 +646,10 @@ def install_cuda_torch(base: Path | None = None,
         print(f"CUDA 引擎已就绪: {dest}")
         return dest
 
-    wheel = _wheel_cache_dir() / TORCH_CUDA_WHEEL
-    print(f"下载 CUDA 推理引擎（{TORCH_CUDA_WHEEL}，约 3.3 GB，多段并行 + 镜像回退）…")
+    req = cuda_engine_requirements(platform_str=platform_str, version_info=version_info,
+                                   machine=machine, pointer_size=pointer_size)
+    wheel = _wheel_cache_dir() / req.wheel
+    print(f"下载 CUDA 推理引擎（{req.wheel}，约 3.3 GB，多段并行 + 镜像回退）…")
     download_total = 0
 
     def _track_download(done: int, total: int) -> bool:
@@ -503,14 +658,14 @@ def install_cuda_torch(base: Path | None = None,
         download_total = total
         return True if progress_callback is None else progress_callback(done, total)
 
-    _download(TORCH_CUDA_URLS, wheel, _track_download)
+    _download(req.urls, wheel, _track_download)
     actual = sha256_of(wheel)
-    if actual != TORCH_CUDA_SHA256:
+    if actual != req.sha256:
         wheel.unlink(missing_ok=True)
         wheel.with_suffix(wheel.suffix + ".part").unlink(missing_ok=True)
-        _log().error("CUDA 引擎 wheel SHA256 校验失败: 期望 %s，实际 %s", TORCH_CUDA_SHA256, actual)
+        _log().error("CUDA 引擎 wheel SHA256 校验失败: 期望 %s，实际 %s", req.sha256, actual)
         raise RuntimeError(
-            f"SHA256 校验失败: 期望 {TORCH_CUDA_SHA256[:16]}…，实际 {actual[:16]}…。"
+            f"SHA256 校验失败: 期望 {req.sha256[:16]}…，实际 {actual[:16]}…。"
             f"下载源可能已变更，请稍后重试")
 
     if dest.exists():

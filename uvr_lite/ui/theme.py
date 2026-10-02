@@ -96,7 +96,7 @@ def _qss() -> str:
         color: {t["ink"]};
     }}
 
-    QLineEdit, QComboBox, QSpinBox {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
         background: {t["paper_3"]};
         color: {t["ink"]};
         border: 2px solid {t["paper_3"]};
@@ -105,13 +105,13 @@ def _qss() -> str:
         selection-background-color: {t["accent_wash"]};
         selection-color: {t["ink"]};
     }}
-    QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{
+    QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
         background: {t["paper"]};
     }}
-    QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
         border-color: {t["focus"]};
     }}
-    QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+    QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
         color: {t["ink_disabled"]};
         background: {t["paper_2"]};
     }}

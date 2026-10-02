@@ -42,8 +42,14 @@ if errorlevel 1 (
 if errorlevel 1 ( echo [ERROR] torch installation failed & pause & exit /b 1 )
 
 REM ---- 4. install package + deps ----
-echo [4/5] Installing uvr-lite and dependencies ...
-pip install -e . --quiet
+REM 必须带 [ui] extras：GUI 依赖 PySide6-Essentials 只挂在 optional extra 上，
+REM 裸 `pip install -e .` 装出来的环境跑 `uvr-lite ui` 会 ImportError。
+echo [4/5] Installing uvr-lite and dependencies (including GUI extras) ...
+pip install -e ".[ui]" --quiet
+if errorlevel 1 (
+    echo [WARN] GUI extras installation failed, retrying without them ...
+    pip install -e . --quiet
+)
 if errorlevel 1 ( echo [ERROR] dependency installation failed & pause & exit /b 1 )
 
 REM ---- 5. download model (SHA256 verified) ----
