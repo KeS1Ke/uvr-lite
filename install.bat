@@ -14,6 +14,14 @@ if errorlevel 1 (
 )
 for /f "delims=" %%v in ('python -c "import sys; print(str(sys.version_info[0])+'.'+str(sys.version_info[1]))"') do set PYVER=%%v
 echo [1/5] Using Python %PYVER%
+REM pyproject 声明 requires-python >= 3.10：先比版本再建 venv，否则低版本会先建
+REM 环境、装完 torch 才在 pip/运行时失败，用户等半天只看到一句无从下手的报错。
+REM 比较交给解释器自己做（bat 里 number 比较受区域设置影响，不用）。
+python -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"
+if errorlevel 1 (
+    echo [ERROR] Python %PYVER% is too old. uvr-lite requires Python 3.10 or newer.
+    pause & exit /b 1
+)
 
 REM ---- 2. create venv ----
 if not exist .venv (

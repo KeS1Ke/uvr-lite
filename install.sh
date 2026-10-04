@@ -12,6 +12,12 @@ echo "============================================"
 PY="python3"
 command -v "$PY" >/dev/null 2>&1 || { echo "[ERROR] Python 3 not found. Install Python 3.10+ first."; exit 1; }
 echo "[1/5] Using $($PY --version)"
+# pyproject 声明 requires-python >= 3.10：先比版本再建 venv，否则低版本会先建
+# 环境、装完 torch 才在 pip/运行时失败，用户等半天只看到一句无从下手的报错。
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "[ERROR] $("$PY" --version 2>&1) is too old. uvr-lite requires Python 3.10 or newer."
+    exit 1
+fi
 
 # ---- 2. create venv ----
 if [ ! -d .venv ]; then
