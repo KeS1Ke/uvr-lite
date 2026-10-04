@@ -92,9 +92,12 @@ def test_install_idempotent_skips_download(fake_wheel, tmp_path, monkeypatch):
 
 
 def test_install_bad_sha_removes_wheel_and_raises(monkeypatch, tmp_path):
-    """SHA 常量保持真实值（假 wheel 必然不匹配）→ 删缓存并报错。"""
+    """SHA 常量保持真实值（假 wheel 必然不匹配）→ 删缓存并报错。
+
+    报错要带完整 sha256 和下载 URL，不能只截断前 16 位。
+    """
     wheel = tmp_path / "fake.whl"
-    make_wheel(wheel)
+    actual = make_wheel(wheel)
     cache = tmp_path / "cache"
     monkeypatch.setattr(dl, "_wheel_cache_dir", lambda: cache)
 
@@ -103,15 +106,28 @@ def test_install_bad_sha_removes_wheel_and_raises(monkeypatch, tmp_path):
         shutil.copy2(wheel, dest)
 
     monkeypatch.setattr(dl, "_download", fake_download)
-    with pytest.raises(RuntimeError, match="SHA256 校验失败"):
+    with pytest.raises(RuntimeError, match="SHA256 校验失败") as exc:
         install_cuda_torch(tmp_path / "base", **SUPPORTED_ENV)
+    msg = str(exc.value)
+    assert dl.TORCH_CUDA_SHA256 in msg, f"期望哈希必须完整出现: {msg}"
+    assert actual in msg, f"实际哈希必须完整出现: {msg}"
+    assert dl.TORCH_CUDA_URLS[0] in msg, f"报错要带上 URL: {msg}"
+    assert "…" not in msg, f"不应再截断哈希: {msg}"
     assert not (cache / dl.TORCH_CUDA_WHEEL).exists(), "损坏缓存应被删除"
     assert not cuda_torch_installed(tmp_path / "base")
 
 
-def test_install_cancel_during_extract(fake_wheel, tmp_path):
-    """解压阶段取消：抛 InterruptedError，wheel 缓存保留（下次直接解压）。"""
+def test_install_cancel_during_extract(fake_wheel, tmp_path, monkeypatch):
+    """解压阶段取消：抛 InterruptedError，wheel 与侧车保留；重试不得再下载。"""
     calls = []
+    downloads = {"n": 0}
+    real_download = dl._download
+
+    def counting(urls, dest, progress_callback=None, retries=2):
+        downloads["n"] += 1
+        return real_download(urls, dest, progress_callback, retries)
+
+    monkeypatch.setattr(dl, "_download", counting)
 
     def cb(done, total):
         calls.append((done, total))
@@ -119,12 +135,21 @@ def test_install_cancel_during_extract(fake_wheel, tmp_path):
 
     with pytest.raises(InterruptedError):
         install_cuda_torch(tmp_path / "base", progress_callback=cb, **SUPPORTED_ENV)
-    assert (fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL).exists()
+    wheel = fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL
+    side = dl._wheel_sha_sidecar(wheel)
+    assert wheel.exists()
+    assert side.is_file()
+    assert side.read_text(encoding="utf-8").strip() == dl.TORCH_CUDA_SHA256
     # 取消后被清理干净：残缺的 torch/__init__.py 不能让 installed 判真
     assert not cuda_torch_installed(tmp_path / "base")
-    # 取消后重新安装：不再下载（wheel 已就绪），直接解压完成
+    assert not (tmp_path / "base" / "torch_cuda").exists()
+    assert not (tmp_path / "base" / "torch_cuda.partial").exists()
+    assert downloads["n"] == 1
+    # 取消后重新安装：侧车 sha 已匹配，不得再调用 _download
     install_cuda_torch(tmp_path / "base", **SUPPORTED_ENV)
+    assert downloads["n"] == 1, "解压取消后重试不应再次下载"
     assert cuda_torch_installed(tmp_path / "base")
+    assert calls, "解压阶段应上报过进度"
 
 
 def test_install_cancel_clears_half_extracted_dest(fake_wheel, tmp_path, monkeypatch):
@@ -150,9 +175,12 @@ def test_install_cancel_clears_half_extracted_dest(fake_wheel, tmp_path, monkeyp
     assert extracted["n"] > 1, "应至少解压出一个成员（含 torch/__init__.py）"
     dest = tmp_path / "base" / "torch_cuda"
     assert not dest.exists(), "取消后半成品目录必须清理干净"
+    assert not (tmp_path / "base" / "torch_cuda.partial").exists()
     assert not cuda_torch_installed(tmp_path / "base")
-    # wheel 缓存保留：docstring 承诺下次直接从解压开始
-    assert (fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL).exists()
+    # wheel 与侧车保留：下次跳过下载，直接解压
+    wheel = fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL
+    assert wheel.exists()
+    assert dl._wheel_sha_sidecar(wheel).is_file()
 
 
 def test_cuda_torch_installed_detects_marker(fake_wheel, tmp_path):
@@ -266,9 +294,15 @@ def test_cuda_install_rejects_unsupported_env_before_downloading(tmp_path, monke
 
 
 def test_cuda_install_idempotent_wins_over_unsupported_env(tmp_path, monkeypatch):
-    """回归：已安装则先返回，不再过环境门槛（解释器换代也不该报错）。"""
-    (tmp_path / "base" / "torch_cuda" / "torch").mkdir(parents=True)
-    (tmp_path / "base" / "torch_cuda" / "torch" / "__init__.py").write_text("")
+    """回归：已安装则先返回，不再过环境门槛（解释器换代也不该报错）。
+
+    旧的完整安装没有 .complete，但 torch/__init__.py 与 version.py 都在：
+    视为已安装并补写标记，不重下。
+    """
+    torch_dir = tmp_path / "base" / "torch_cuda" / "torch"
+    torch_dir.mkdir(parents=True)
+    (torch_dir / "__init__.py").write_text("")
+    (torch_dir / "version.py").write_text("__version__ = '2.7.1'\n")
     calls = {"n": 0}
 
     def boom(*args, **kwargs):
@@ -280,6 +314,57 @@ def test_cuda_install_idempotent_wins_over_unsupported_env(tmp_path, monkeypatch
                               version_info=(3, 12, 8, "final", 0))
     assert dest == tmp_path / "base" / "torch_cuda", "已安装时环境不支持也应照常返回"
     assert calls["n"] == 0
+    assert (dest / ".complete").is_file(), "旧的完整安装应补写完成标记"
+
+
+def test_incomplete_torch_cuda_is_not_installed(tmp_path):
+    """只有 __init__.py、或只有 version.py，都不算已安装。"""
+    torch_dir = tmp_path / "base" / "torch_cuda" / "torch"
+    torch_dir.mkdir(parents=True)
+    (torch_dir / "__init__.py").write_text("")
+    assert not cuda_torch_installed(tmp_path / "base")
+    (torch_dir / "__init__.py").unlink()
+    (torch_dir / "version.py").write_text("")
+    assert not cuda_torch_installed(tmp_path / "base")
+    (torch_dir / "__init__.py").write_text("")
+    (tmp_path / "base" / "torch_cuda" / ".complete").write_text("abc")
+    assert cuda_torch_installed(tmp_path / "base")
+
+
+def test_reinstall_replaces_incomplete_tree(fake_wheel, tmp_path):
+    """残缺正式目录下次安装先清掉，再换成解压成功的树。"""
+    base = tmp_path / "base"
+    broken = base / "torch_cuda" / "torch"
+    broken.mkdir(parents=True)
+    (broken / "__init__.py").write_text("partial")
+    (broken / "leftover.txt").write_text("x")
+    assert not cuda_torch_installed(base)
+    dest = install_cuda_torch(base, **SUPPORTED_ENV)
+    assert cuda_torch_installed(base)
+    assert (dest / ".complete").read_text(encoding="utf-8").strip() == dl.TORCH_CUDA_SHA256
+    assert not (broken / "leftover.txt").exists()
+    assert (dest / "torch" / "__init__.py").read_text(encoding="utf-8") == "# fake torch\n"
+    assert not (base / "torch_cuda.partial").exists()
+
+
+def test_extract_error_removes_partial(fake_wheel, tmp_path, monkeypatch):
+    """解压失败（不只是取消）也要删掉临时目录，不能留下半成品。"""
+    import zipfile
+
+    class _Boom(zipfile.ZipFile):
+        def extract(self, member, path=None, pwd=None):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(zipfile, "ZipFile", _Boom)
+    with pytest.raises(OSError, match="disk full"):
+        install_cuda_torch(tmp_path / "base", **SUPPORTED_ENV)
+    assert not (tmp_path / "base" / "torch_cuda.partial").exists()
+    assert not (tmp_path / "base" / "torch_cuda").exists()
+    assert not cuda_torch_installed(tmp_path / "base")
+    # 不是坏 zip：wheel 与侧车留着，下次可直接解压
+    wheel = fake_wheel.parent / "cache" / dl.TORCH_CUDA_WHEEL
+    assert wheel.exists()
+    assert dl._wheel_sha_sidecar(wheel).is_file()
 
 
 def test_block_reason_full_when_unsupported_and_empty_when_supported():

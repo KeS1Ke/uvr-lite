@@ -229,7 +229,7 @@ def test_ensure_model_marks_verified(fake_download_env):
 
 
 def test_ensure_model_verified_marker_skips_hash(fake_download_env, monkeypatch):
-    """标记命中（size+mtime 未变）→ 跳过全量 SHA256（~320MB 读盘成本）。"""
+    """标记命中（期望 sha + 文件大小）→ 跳过全量 SHA256（~320MB 读盘成本）。"""
     ckpt = fake_download_env / "test_model.ckpt"
     ckpt.write_bytes(DATA)
     dl.ensure_model("test_model")  # 首次：全量校验 + 写标记
@@ -246,13 +246,48 @@ def test_ensure_model_verified_marker_skips_hash(fake_download_env, monkeypatch)
 
 
 def test_ensure_model_changed_file_revalidates(fake_download_env):
-    """文件被替换（size/mtime 变化）→ 标记失效，重新校验并下载。"""
+    """文件被替换（大小变化）→ 标记失效，重新校验并下载。"""
     ckpt = fake_download_env / "test_model.ckpt"
     ckpt.write_bytes(DATA)
     dl.ensure_model("test_model")
     ckpt.write_bytes(b"corrupt")
     dl.ensure_model("test_model")
     assert ckpt.read_bytes() == DATA, "内容变更应触发重新下载"
+
+
+def test_verified_marker_binds_sha_and_size(tmp_path):
+    """只认 `{sha256}:{size}`。旧的 size:mtime、sha 不符、大小不符都不命中。"""
+    ckpt = tmp_path / "m.ckpt"
+    ckpt.write_bytes(DATA)
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert not dl._check_verified(ckpt, sha)
+    dl._mark_verified(ckpt, sha)
+    assert dl._check_verified(ckpt, sha)
+    assert dl._verified_marker(ckpt).read_text(encoding="utf-8").strip() == f"{sha}:{len(DATA)}"
+    assert not dl._check_verified(ckpt, "c" * 64), "标记 sha 必须等于本次期望"
+    st = ckpt.stat()
+    dl._verified_marker(ckpt).write_text(f"{st.st_size}:{st.st_mtime_ns}", encoding="utf-8")
+    assert not dl._check_verified(ckpt, sha), "旧的 size:mtime 标记不得命中"
+
+
+def test_old_mtime_marker_is_rehashed_and_rewritten(fake_download_env, monkeypatch):
+    """旧标记一律未命中：重新哈希，通过后改写成 sha:size。"""
+    ckpt = fake_download_env / "test_model.ckpt"
+    ckpt.write_bytes(DATA)
+    st = ckpt.stat()
+    dl._verified_marker(ckpt).write_text(f"{st.st_size}:{st.st_mtime_ns}", encoding="utf-8")
+    hashed = {"n": 0}
+    real_sha = dl.sha256_of
+
+    def counting_sha(path):
+        hashed["n"] += 1
+        return real_sha(path)
+
+    monkeypatch.setattr(dl, "sha256_of", counting_sha)
+    dl.ensure_model("test_model")
+    assert hashed["n"] == 1, "旧标记不得跳过全量哈希"
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert dl._verified_marker(ckpt).read_text(encoding="utf-8").strip() == f"{sha}:{len(DATA)}"
 
 
 # ---------- 并行分段下载（Range server） ----------
@@ -613,11 +648,12 @@ def test_ensure_model_reclaims_retired_ckpt(with_marker, monkeypatch, tmp_path):
     _retired_env(monkeypatch, tmp_path)
     new = tmp_path / "test_model.lite.safetensors"
     new.write_bytes(DATA)
+    sha = hashlib.sha256(DATA).hexdigest()
     if with_marker:
-        dl._mark_verified(new)
+        dl._mark_verified(new, sha)
     old = tmp_path / "test_model.ckpt"
     old.write_bytes(b"legacy" * 100)
-    dl._mark_verified(old)
+    dl._mark_verified(old, sha)
 
     with _download_log() as messages:
         assert dl.ensure_model("test_model") == new
@@ -671,7 +707,7 @@ def test_ensure_model_never_deletes_current_weight(monkeypatch, tmp_path):
                  retired_filenames=["test_model.lite.safetensors"])
     new = tmp_path / "test_model.lite.safetensors"
     new.write_bytes(DATA)
-    dl._mark_verified(new)
+    dl._mark_verified(new, hashlib.sha256(DATA).hexdigest())
 
     assert dl.ensure_model("test_model") == new
     assert new.exists(), "当前权重被 retired_filenames 误删"

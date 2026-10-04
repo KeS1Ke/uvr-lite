@@ -39,12 +39,27 @@ def read_audio(path: Path) -> tuple[np.ndarray, int]:
 
     主路径 soundfile（flac/wav/ogg/mp3 原生解码，libsndfile）；
     m4a 等 libsndfile 不支持的格式回退 audioread（需系统 ffmpeg）。
+    兜底若抛出没有正文的 EOFError / NoBackendError，则带上 soundfile
+    原文和「文件不是可解码的音频」；兜底异常已有正文时原样抛出。
     """
     try:
         data, orig_sr = sf.read(str(path), dtype="float32", always_2d=True)
-    except RuntimeError:
-        data, orig_sr = _read_audioread(path)
+    except RuntimeError as sf_err:
+        data, orig_sr = _audioread_or_explain(path, sf_err)
     return data.T, orig_sr  # (frames, channels) -> (channels, frames)
+
+
+def _audioread_or_explain(path: Path, sf_err: Exception) -> tuple[np.ndarray, int]:
+    """audioread 兜底。空消息的 EOF/无后端错误改写成带 soundfile 原文的说明。"""
+    from audioread.exceptions import NoBackendError
+
+    try:
+        return _read_audioread(path)
+    except (EOFError, NoBackendError) as err:
+        if str(err).strip():
+            raise
+        sf_text = str(sf_err).strip() or type(sf_err).__name__
+        raise RuntimeError(f"文件不是可解码的音频（{sf_text}）") from err
 
 
 def _read_audioread(path: Path) -> tuple[np.ndarray, int]:

@@ -131,9 +131,12 @@ def demix(
         num_instruments = len(prefer_target_instrument(config))
         num_overlap = config.inference.num_overlap
 
-        fade_size = chunk_size // 10
+        # Fade only inside the overlap. num_overlap=1 has none, so the window
+        # stays all ones; a zero endpoint would become a zero sample.
         step = chunk_size // num_overlap
-        border = chunk_size - step
+        overlap_samples = chunk_size - step
+        fade_size = 0 if overlap_samples <= 0 else min(chunk_size // 10, overlap_samples)
+        border = overlap_samples
         length_init = mix.shape[-1]
         windowing_array = _getWindowingArray(chunk_size, fade_size)
         # Add padding for generic mode to handle edge artifacts
@@ -182,10 +185,12 @@ def demix(
 
                     if mode == "generic":
                         window = windowing_array.clone() # using clone() fixes the clicks at chunk edges when using batch_size=1
-                        if i - step == 0:  # First audio chunk, no fadein
-                            window[:fade_size] = 1
-                        elif i >= mix.shape[1]:  # Last audio chunk, no fadeout
-                            window[-fade_size:] = 1
+                        # fade_size==0: skip. window[-0:] would be the whole window.
+                        if fade_size > 0:
+                            if i - step == 0:  # First audio chunk, no fadein
+                                window[:fade_size] = 1
+                            elif i >= mix.shape[1]:  # Last audio chunk, no fadeout
+                                window[-fade_size:] = 1
 
                     for j, (start, seg_len) in enumerate(batch_locations):
                         if mode == "generic":
@@ -240,7 +245,8 @@ def apply_tta(
     model_type: str,
     bigshifts: int = 1,
     pbar: bool = False,
-    progress_cb=None
+    progress_cb=None,
+    demix_progress_cb=None
 ) -> Union[dict[str, np.ndarray], np.ndarray]:
     """
     Enhance source separation results using Test-Time Augmentation (TTA).
@@ -274,7 +280,8 @@ def apply_tta(
             device,
             model_type=model_type,
             bigshifts=bigshifts,
-            pbar=pbar
+            pbar=pbar,
+            demix_progress_cb=demix_progress_cb
         )
         for el in waveforms:
             if i == 0:
@@ -317,6 +324,11 @@ def _getWindowingArray(window_size: int, fade_size: int) -> torch.Tensor:
     If `window_size=10` and `fade_size=3`, the output will be:
     tensor([0.0000, 0.5000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 0.5000, 0.0000])
     """
+
+    # fade_size<=0 must stay all ones. linspace(0, 1, 0) is empty, and
+    # assigning it through window[-0:] replaces the entire window.
+    if fade_size <= 0:
+        return torch.ones(window_size)
 
     fadein = torch.linspace(0, 1, fade_size)
     fadeout = torch.linspace(1, 0, fade_size)

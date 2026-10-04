@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent  # tests/ 的上一层 = 仓�
 
 # ---------- sys.path 前置 ----------
 # 本机存在 editable 安装（site-packages/__editable__.uvr_lite-*.pth →
-# D:\Vibe-coding Projects\uvr-lite\uvr_lite）。editable finder 是 append 到
+# 本机 editable 安装的 .pth 指向仓库里的 uvr_lite）。editable finder 是 append 到
 # sys.meta_path 末尾的，通常被排在前面的 PathFinder 抢先，因此「当前工作树
 # 优先」其实是靠 cwd 恰好在 sys.path[0] 侥幸成立：换成 `pytest` 脚本入口
 # （sys.path[0] 不再是 cwd）或从别处调用，import uvr_lite 就会解析到另一份

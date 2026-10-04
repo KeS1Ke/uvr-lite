@@ -51,8 +51,15 @@ from ..download import (
 )
 from ..log import ensure_log_dir, get_logger, log_exception, log_hint, log_path
 from ..models import MODEL_REGISTRY
+from ..quality import (
+    QUALITY_CHOICES,
+    QUALITY_PRESETS,
+    QUALITY_STANDARD,
+    quality_from_overlap,
+    quality_overlap,
+)
 from ..stems import StemPair, find_stem_pairs, pair_stems, split_stem
-from .files import dedup_paths, is_audio, precheck_audio, scan_audio_files
+from .files import dedup_paths, is_audio, scan_audio_files
 from .progress import PHASE_CN, estimate_eta, summary_text
 from .theme import apply as apply_theme
 from .worker import (
@@ -133,6 +140,32 @@ def _settings_flag(value: object, default: bool = False) -> bool:
     return default
 
 
+def _settings_int(value: object, default: int, lo: int, hi: int) -> int:
+    """坏注册表值用默认，再夹到控件范围。不能让 MainWindow() 抛出去。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, number))
+
+
+def _settings_float(value: object, default: float, lo: float, hi: float) -> float:
+    """同 _settings_int；NaN/Inf 视为坏值。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number or number == float("inf") or number == float("-inf"):
+        return default
+    return max(lo, min(hi, number))
+
+
+_QUALITY_NOTE = (
+    "本应用的人声模型已经是 ep317；karaoke 是主唱/和声模型，不是更纯的人声档。"
+    "要更干净选「高」，CPU 要速度选「快」。"
+)
+
+
 class ToggleSelectList(QListWidget):
     """点击式多选：点一次选中、再点取消，各文件互不影响（无需 Ctrl）。"""
 
@@ -172,6 +205,14 @@ class MainWindow(QMainWindow):
         self._mix_failed_names: list[str] = []
         self._mix_file_times: list[float] = []
         self._mix_out_dir = ""
+        self._mix_ignored: list[Path] = []
+        # 关窗时 wait 超时：先 ignore，等线程真正结束后再 close 一次
+        self._close_after_stop = False
+        self._close_guard = False
+        self._quit_after_close = False
+        self._close_listened: set[int] = set()
+        self._precheck_aborted = False
+        self._sep_paths: list[Path] = []
         # 版本号放标题：界面里没有别的出口（cli --version 用户看不到），标题截图即报障信息
         self.setWindowTitle(f"uvr-lite 人声分离/合成 {__version__}")
         self.setWindowIcon(QIcon(str(_ICON)))
@@ -266,9 +307,12 @@ class MainWindow(QMainWindow):
         self.spin_batch = QSpinBox(param_box)
         self.spin_batch.setRange(0, 64)
         self.spin_batch.setSpecialValueText("默认（模型配置）")
-        self.spin_overlap = QSpinBox(param_box)
-        self.spin_overlap.setRange(0, 8)
-        self.spin_overlap.setSpecialValueText("默认（模型配置）")
+        self.combo_quality = QComboBox(param_box)
+        for name in QUALITY_CHOICES:
+            self.combo_quality.addItem(str(QUALITY_PRESETS[name]["menu"]), name)
+        self._select_data(self.combo_quality, QUALITY_STANDARD)
+        self._sync_quality_tooltip()
+        self.combo_quality.currentIndexChanged.connect(self._sync_quality_tooltip)
         self.check_tta = QCheckBox("测试时增强（3 倍耗时，质量更好）", param_box)
         form.addRow("模型", self.combo_model)
         form.addRow("设备", self.combo_device)
@@ -276,7 +320,7 @@ class MainWindow(QMainWindow):
         form.addRow("FLAC 位深", self.combo_pcm)
         form.addRow("BigShifts 次数", self.spin_bigshifts)
         form.addRow("批大小（低显存设 1）", self.spin_batch)
-        form.addRow("重叠窗口数（1 最快）", self.spin_overlap)
+        form.addRow("质量", self.combo_quality)
         form.addRow("", self.check_tta)
         sep_lay.addWidget(param_box)
 
@@ -531,10 +575,15 @@ class MainWindow(QMainWindow):
         return added
 
     def _mix_rebuild_list(self) -> None:
-        """按当前文件池重新配对并重建列表：成对的在前，缺另一半的在后。"""
+        """按当前文件池重新配对并重建列表：成对、缺另一半、非分离音轨。
+
+        ignored 也要出行，否则拖入普通 song.mp3 会「已添加」但列表空白，
+        文件还留在池里删不掉。这类行不是可合成的一对。
+        """
         result = pair_stems(self._mix_files)
         self._mix_pairs = result.pairs
         self._mix_unmatched = result.unmatched
+        self._mix_ignored = list(result.ignored)
         self.mix_list.clear()
         self._mix_row_paths = []
         for pair in self._mix_pairs:
@@ -547,6 +596,12 @@ class MainWindow(QMainWindow):
             split = split_stem(p)
             missing = "伴奏" if split is not None and split[1] == "vocals" else "人声"
             base = f"{p.name}（缺少{missing}）"
+            item = QListWidgetItem(f"{_PREFIX_BAD}{base}", self.mix_list)
+            item.setData(Qt.UserRole, str(p))
+            item.setData(Qt.UserRole + 1, base)
+            self._mix_row_paths.append([p])
+        for p in self._mix_ignored:
+            base = f"{p.name}（非分离音轨）"
             item = QListWidgetItem(f"{_PREFIX_BAD}{base}", self.mix_list)
             item.setData(Qt.UserRole, str(p))
             item.setData(Qt.UserRole + 1, base)
@@ -600,7 +655,7 @@ class MainWindow(QMainWindow):
             self.label_status.setText(
                 f"无法读取文件夹：{Path(folder).name}（权限不足？）。")
             return
-        if not result.pairs and not result.unmatched:
+        if not result.pairs and not result.unmatched and not result.ignored:
             self.label_status.setText(
                 "该文件夹里没有找到分离音轨（*-vocals / *-instrumental）。")
             return
@@ -608,6 +663,7 @@ class MainWindow(QMainWindow):
             [p.vocals for p in result.pairs]
             + [p.instrumental for p in result.pairs]
             + list(result.unmatched)
+            + list(result.ignored)
         )
         added = self._mix_add_paths(paths)
         self.settings.setValue("mix_last_dir", str(Path(folder).resolve()))
@@ -760,27 +816,61 @@ class MainWindow(QMainWindow):
 
     # ---------- 参数记忆 ----------
 
+    def _restore_quality(self, s: QSettings) -> None:
+        """有 quality 用它；否则用旧的 num_overlap；都没有则标准档。"""
+        name = ""
+        if s.contains("quality"):
+            raw = s.value("quality", "")
+            name = str(raw).strip().lower() if raw is not None else ""
+            if name not in QUALITY_PRESETS:
+                name = ""
+        if not name:
+            if s.contains("num_overlap"):
+                overlap = _settings_int(s.value("num_overlap"), 0, 0, 8)
+                name = quality_from_overlap(overlap)
+            else:
+                name = QUALITY_STANDARD
+        self._select_data(self.combo_quality, name)
+        self._sync_quality_tooltip()
+
+    def _sync_quality_tooltip(self, *_args) -> None:
+        name = self.combo_quality.currentData()
+        preset = QUALITY_PRESETS.get(name) if name in QUALITY_PRESETS else None
+        hint = str(preset["hint"]) if preset else ""
+        tip = f"{hint}\n{_QUALITY_NOTE}" if hint else _QUALITY_NOTE
+        self.combo_quality.setToolTip(tip)
+
     def _restore_settings(self) -> None:
         s = self.settings
         self._select_data(self.combo_model, s.value("model", "bs_roformer_ep317"))
         self._select_data(self.combo_device, s.value("device", "auto"))
         self._select_data(self.combo_format, s.value("format", "auto"))
         self._select_data(self.combo_pcm, str(s.value("pcm", "24")))
-        self.spin_bigshifts.setValue(int(s.value("bigshifts", 1)))
-        self.spin_batch.setValue(int(s.value("batch_size", 0)))
-        self.spin_overlap.setValue(int(s.value("num_overlap", 0)))
-        self.check_tta.setChecked(bool(s.value("tta", False)))
+        self.spin_bigshifts.setValue(_settings_int(
+            s.value("bigshifts", 1), 1,
+            self.spin_bigshifts.minimum(), self.spin_bigshifts.maximum()))
+        self.spin_batch.setValue(_settings_int(
+            s.value("batch_size", 0), 0,
+            self.spin_batch.minimum(), self.spin_batch.maximum()))
+        self._restore_quality(s)
+        self.check_tta.setChecked(_settings_flag(s.value("tta", False)))
         self.check_minimize_tray.setChecked(
             _settings_flag(s.value("minimize_to_tray", False)))
         out = s.value("out_dir", "")
         if out:
             self.edit_out.setText(str(out))
         # 合成页参数（含上次所在功能页）
-        self.combo_mode.setCurrentIndex(int(s.value("mode", MODE_SEPARATE)))
+        mode = _settings_int(
+            s.value("mode", MODE_SEPARATE), MODE_SEPARATE, 0, len(MODE_CHOICES) - 1)
+        self.combo_mode.setCurrentIndex(mode)
         self._select_data(self.mix_combo_format, s.value("mix_format", "auto"))
         self._select_data(self.mix_combo_pcm, str(s.value("mix_pcm", "24")))
-        self.spin_vocal_gain.setValue(float(s.value("mix_vocal_gain", 1.0)))
-        self.spin_inst_gain.setValue(float(s.value("mix_inst_gain", 1.0)))
+        self.spin_vocal_gain.setValue(_settings_float(
+            s.value("mix_vocal_gain", 1.0), 1.0,
+            self.spin_vocal_gain.minimum(), self.spin_vocal_gain.maximum()))
+        self.spin_inst_gain.setValue(_settings_float(
+            s.value("mix_inst_gain", 1.0), 1.0,
+            self.spin_inst_gain.minimum(), self.spin_inst_gain.maximum()))
         self.check_normalize.setChecked(_settings_flag(s.value("mix_normalize", False)))
         mix_out = s.value("mix_out_dir", "")
         if mix_out:
@@ -794,7 +884,7 @@ class MainWindow(QMainWindow):
         s.setValue("pcm", self.combo_pcm.currentText())
         s.setValue("bigshifts", self.spin_bigshifts.value())
         s.setValue("batch_size", self.spin_batch.value())
-        s.setValue("num_overlap", self.spin_overlap.value())
+        s.setValue("quality", self.combo_quality.currentData())
         s.setValue("tta", self.check_tta.isChecked())
         s.setValue("minimize_to_tray", self.check_minimize_tray.isChecked())
         s.setValue("out_dir", self.edit_out.text())
@@ -883,7 +973,7 @@ class MainWindow(QMainWindow):
         self._dl_thread.quit()
         self._dl_thread.wait(3000)
         self.dl_progress.setVisible(False)
-        self.btn_download.setEnabled(True)
+        self.btn_download.setEnabled(not self._busy)
         self.btn_download.setText("下载模型")
         self.btn_download.clicked.disconnect()
         self.btn_download.clicked.connect(self._start_download)
@@ -966,6 +1056,8 @@ class MainWindow(QMainWindow):
         self.btn_cuda.clicked.disconnect()
         self.btn_cuda.clicked.connect(self._start_cuda_download)
         self._refresh_engine_status()
+        if self._busy:
+            self.btn_cuda.setEnabled(False)
         if ok:
             QMessageBox.information(
                 self, "CUDA 引擎已安装",
@@ -998,46 +1090,42 @@ class MainWindow(QMainWindow):
         out_dir = str(Path(out_dir).resolve())
         self._save_settings()
 
-        # 预检：先快速校验格式——无法识别为音频的文件标 ✗ 且不进队列；
-        # 内容真是音频（即使后缀被改）正常通过
-        ok_paths, bad_paths = [], []
-        for p in self._paths:
-            if precheck_audio(p):
-                ok_paths.append(p)
-            else:
-                bad_paths.append(p)
-                self._set_item_state(p, _PREFIX_BAD, "（格式不支持）")
-        if bad_paths:
-            names = "、".join(p.name for p in bad_paths[:5]) + ("…" if len(bad_paths) > 5 else "")
+        device = self.combo_device.currentText()
+        # 与 _refresh_engine_status 同一判断：没装 torch_cuda 就不能选 cuda。
+        # auto/cpu 不拦截。预检在 worker 里做，这里还没起线程。
+        if device == "cuda" and not cuda_torch_installed():
             self.label_status.setText(
-                f"{len(bad_paths)} 个文件无法识别为音频，已跳过：" + names)
-            _log().warning("%d 个文件预检失败（非音频或已损坏）: %s",
-                           len(bad_paths), names)
-        if not ok_paths:
-            # 站在用户角度这只是"选错文件"，但排错需要知道具体是哪几个文件名
-            QMessageBox.warning(
-                self, "没有可处理的文件",
-                "所选文件都无法识别为音频格式，请检查文件是否损坏。" + log_hint())
+                "未安装 CUDA 引擎，无法使用 CUDA 设备。"
+                "请先下载 CUDA 引擎，或改用「自动」/「CPU」。"
+            )
             return
 
+        quality_name = self.combo_quality.currentData() or QUALITY_STANDARD
         params = SeparationParams(
             model_name=model,
-            device=self.combo_device.currentText(),
+            device=device,
             fmt=self.combo_format.currentText(),
             pcm=f"PCM_{self.combo_pcm.currentText()}",
             bigshifts=self.spin_bigshifts.value(),
             # 0 值（"默认（模型配置）"）→ None：让引擎回落模型自带配置
             batch_size=self.spin_batch.value() or None,
-            num_overlap=self.spin_overlap.value() or None,
+            # 质量档总是明确的 1/2/4，不再把 0 当成「跟模型配置」
+            num_overlap=quality_overlap(str(quality_name)),
             tta=self.check_tta.isChecked(),
         )
-        self._worker = SeparationWorker(list(ok_paths), out_dir, params)
+        # 预检在 worker.run() 里、加载模型之前。这里先把整表交出去。
+        self._sep_paths = list(self._paths)
+        self._ok_paths = list(self._sep_paths)
+        self._precheck_aborted = False
+        self._worker = SeparationWorker(list(self._sep_paths), out_dir, params)
         # 上一轮若没走到完成槽，这里仍占着事件循环；先退出再换指针，避免变成孤儿。
         self._release_thread(self._thread)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.file_rejected.connect(self._on_file_rejected)
+        self._worker.precheck_ready.connect(self._on_precheck_ready)
         self._worker.file_done.connect(self._on_file_done)
         self._worker.file_failed.connect(self._on_file_failed)
         self._worker.all_finished.connect(self._on_all_finished)
@@ -1049,9 +1137,6 @@ class MainWindow(QMainWindow):
         self._t_file = time.time()
         self._file_times: list[float] = []
         self._failed_names: list[str] = []
-        self._ok_paths = ok_paths  # 队列索引 → 文件（列表状态标记用）
-        for p in ok_paths:
-            self._set_item_state(p, _PREFIX_PENDING)
         self._set_busy(True)
         self.progress.bar.setValue(0)
         self.label_status.setText("准备中…")
@@ -1125,6 +1210,39 @@ class MainWindow(QMainWindow):
             f" {file_pct}% · 预计剩余 {eta_txt}"
         )
 
+    def _on_file_rejected(self, file_idx: int) -> None:
+        """预检未过：标「格式不支持」，这一项不进分离队列。"""
+        if not (0 <= file_idx < len(self._sep_paths)):
+            return
+        self._set_item_state(self._sep_paths[file_idx], _PREFIX_BAD, "（格式不支持）")
+
+    def _on_precheck_ready(self, ok_indices) -> None:
+        """预检结束。合格项才标成待处理；一个都没有就不该再加载模型。"""
+        try:
+            indices = [int(i) for i in ok_indices]
+        except TypeError:
+            indices = []
+        ok_set = set(indices)
+        bad = [p for i, p in enumerate(self._sep_paths) if i not in ok_set]
+        for p in bad:
+            self._set_item_state(p, _PREFIX_BAD, "（格式不支持）")
+        if bad:
+            names = "、".join(p.name for p in bad[:5]) + ("…" if len(bad) > 5 else "")
+            self.label_status.setText(
+                f"{len(bad)} 个文件无法识别为音频，已跳过：" + names)
+            _log().warning("%d 个文件预检失败（非音频或已损坏）: %s", len(bad), names)
+        self._ok_paths = [
+            self._sep_paths[i] for i in indices if 0 <= i < len(self._sep_paths)]
+        for p in self._ok_paths:
+            self._set_item_state(p, _PREFIX_PENDING)
+        if indices:
+            return
+        # 必须先于弹窗置位：warning 的嵌套事件循环会把紧随其后的 all_finished 抽走
+        self._precheck_aborted = True
+        QMessageBox.warning(
+            self, "没有可处理的文件",
+            "所选文件都无法识别为音频格式，请检查文件是否损坏。" + log_hint())
+
     def _on_file_done(self, file_idx, written) -> None:
         self._file_times.append(time.time() - self._t_file)
         self._t_file = time.time()
@@ -1172,6 +1290,10 @@ class MainWindow(QMainWindow):
     def _on_all_finished(self, ok, failed, cancelled) -> None:
         self._release_thread(self._thread)
         self._set_busy(False)
+        if self._precheck_aborted and not cancelled:
+            # 全部预检失败：弹窗和状态栏已在 _on_precheck_ready 里处理，不再套完成框
+            self._precheck_aborted = False
+            return
         msg = summary_text(ok, self._failed_names)
         if cancelled:
             msg = f"已取消。{msg}"
@@ -1239,11 +1361,15 @@ class MainWindow(QMainWindow):
         m, s = divmod(int(seconds), 60)
         return f"{m} 分 {s} 秒" if m else f"{s} 秒"
 
+    def _cuda_button_allowed(self) -> bool:
+        """与 _refresh_engine_status 一致：已安装或不支持时按钮不可点。"""
+        return (not cuda_torch_installed()) and cuda_engine_supported()
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
                   self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
-                  self.spin_bigshifts, self.spin_batch, self.spin_overlap, self.check_tta,
+                  self.spin_bigshifts, self.spin_batch, self.combo_quality, self.check_tta,
                   self.edit_out, self.btn_out,
                   # 合成页与功能切换同样锁住，防止任务中切换导致按钮语义错位
                   self.combo_mode,
@@ -1252,6 +1378,9 @@ class MainWindow(QMainWindow):
                   self.spin_vocal_gain, self.spin_inst_gain, self.check_normalize,
                   self.mix_edit_out, self.mix_btn_out):
             w.setEnabled(not busy)
+        self.btn_download.setEnabled(not busy)
+        # 结束忙碌时不能无脑 setEnabled(True)：未安装 / 不支持时 CUDA 按钮仍应是灰的。
+        self.btn_cuda.setEnabled(False if busy else self._cuda_button_allowed())
         self.btn_start.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
         self.progress.setEnabled(busy)
@@ -1332,8 +1461,12 @@ class MainWindow(QMainWindow):
             self._tray.hide()
 
     def _quit_from_tray(self) -> None:
+        self._quit_after_close = True
         self.close()
-        QApplication.quit()
+        # 关窗被 wait 超时拦住时先不 quit，等线程结束回调里的 close() 成功后再退。
+        if self._quit_after_close and not self._close_after_stop:
+            self._quit_after_close = False
+            QApplication.quit()
 
     # ---------- 生命周期 ----------
 
@@ -1346,36 +1479,96 @@ class MainWindow(QMainWindow):
         # changeEvent 里直接 hide() 会把最小化状态机弄乱，等这一轮事件结束再藏
         QTimer.singleShot(0, self._hide_to_tray)
 
+    def _stop_thread_for_close(self, worker, thread, timeout: int) -> bool:
+        """cancel/quit/wait 的返回值都要看。线程已停（含已回收）返回 True。
+
+        只有 wait 返回 False 才表示还在跑。cancel/quit 的 None 不是失败。
+        已回收线程走 _is_thread_running，不再 quit/wait。
+        """
+        if not self._is_thread_running(thread):
+            return True
+        cancelled = worker.cancel() if worker is not None else None
+        quitted = thread.quit()
+        waited = thread.wait(timeout)
+        # wait 成功说明线程已经停了，cancel/quit 的 False 不能把窗口卡住。
+        still_running = waited is False or self._is_thread_running(thread)
+        stop_failed = waited is False or cancelled is False or quitted is False
+        if stop_failed and still_running:
+            self._listen_for_thread_exit(thread)
+            return False
+        return True
+
+    def _listen_for_thread_exit(self, thread) -> None:
+        key = id(thread)
+        if key in self._close_listened:
+            return
+        finished = getattr(thread, "finished", None)
+        connect = getattr(finished, "connect", None)
+        if connect is None:
+            self._close_listened.add(key)
+            return
+        self._close_listened.add(key)
+        single = getattr(Qt, "SingleShotConnection", None)
+        try:
+            if single is not None:
+                connect(self._on_task_thread_finished, single)
+            else:
+                connect(self._on_task_thread_finished)
+        except TypeError:
+            connect(self._on_task_thread_finished)
+
+    def _any_task_thread_running(self) -> bool:
+        for attr in ("_thread", "_mix_thread", "_dl_thread", "_cuda_thread"):
+            if self._is_thread_running(getattr(self, attr, None)):
+                return True
+        return False
+
+    def _on_task_thread_finished(self) -> None:
+        """线程真正结束：若关窗还挂着，再 close 一次。同步重入交给定时器。"""
+        if not self._close_after_stop or self._any_task_thread_running():
+            return
+        if self._close_guard:
+            QTimer.singleShot(0, self._on_task_thread_finished)
+            return
+        self.close()
+        if self._quit_after_close and not self._close_after_stop:
+            self._quit_after_close = False
+            QApplication.quit()
+
     def closeEvent(self, event) -> None:
-        if self._tray is not None:
-            self._tray.hide()
-        self._save_settings()
-        # 统一走 _is_thread_running：任务跑完后 QThread 已被 deleteLater 回收，
-        # 裸调 isRunning() 抛的 RuntimeError 会逃出 closeEvent，后面几个线程就
-        # 不再 cancel+wait（运行中的 QThread 带活销毁 → 进程 abort）。
-        if (getattr(self, "_worker", None) is not None
-                and self._is_thread_running(self._thread)):
-            self._worker.cancel()
-            self._thread.quit()
-            self._thread.wait(5000)
-        if (getattr(self, "_mix_worker", None) is not None
-                and self._is_thread_running(self._mix_thread)):
-            self._mix_worker.cancel()
-            self._mix_thread.quit()
-            self._mix_thread.wait(5000)
-        if (getattr(self, "_dl_thread", None) is not None
-                and self._is_thread_running(self._dl_thread)):
-            if getattr(self, "_dl_worker", None) is not None:
-                self._dl_worker.cancel()
-            self._dl_thread.quit()
-            self._dl_thread.wait(3000)
-        if (getattr(self, "_cuda_thread", None) is not None
-                and self._is_thread_running(self._cuda_thread)):
-            if getattr(self, "_cuda_worker", None) is not None:
-                self._cuda_worker.cancel()
-            self._cuda_thread.quit()
-            self._cuda_thread.wait(3000)
-        super().closeEvent(event)
+        # wait 超时的回调里会再 close()。同步重入时不要再走一遍 cancel/wait。
+        if self._close_guard:
+            event.ignore()
+            return
+        self._close_guard = True
+        try:
+            if self._tray is not None:
+                self._tray.hide()
+            self._save_settings()
+            # 统一走 _is_thread_running：任务跑完后 QThread 已被 deleteLater 回收，
+            # 裸调 isRunning() 抛的 RuntimeError 会逃出 closeEvent，后面几个线程就
+            # 不再 cancel+wait（运行中的 QThread 带活销毁 → 进程 abort）。
+            jobs = (
+                (getattr(self, "_worker", None), getattr(self, "_thread", None), 5000),
+                (getattr(self, "_mix_worker", None), getattr(self, "_mix_thread", None), 5000),
+                (getattr(self, "_dl_worker", None), getattr(self, "_dl_thread", None), 3000),
+                (getattr(self, "_cuda_worker", None), getattr(self, "_cuda_thread", None), 3000),
+            )
+            pending = False
+            for worker, thread, timeout in jobs:
+                if not self._stop_thread_for_close(worker, thread, timeout):
+                    pending = True
+            if pending:
+                self._close_after_stop = True
+                self.label_status.setText("正在停止，请稍候…")
+                if not self.isVisible():
+                    self.show()
+                event.ignore()
+                return
+            self._close_after_stop = False
+            super().closeEvent(event)
+        finally:
+            self._close_guard = False
 
 
 class QProgressBarWrap(QWidget):

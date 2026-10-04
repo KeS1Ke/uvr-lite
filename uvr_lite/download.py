@@ -105,27 +105,34 @@ def retired_model_files(name: str) -> list[Path]:
 
 
 # ---------- 校验缓存 ----------
-# 权重文件数百 MB，每轮运行全量 SHA256 约 1s+；用 {ckpt}.verified 标记记录
-# (size, mtime_ns)，文件未变则跳过全量哈希。标记丢失/文件变更时重新校验。
+# 权重文件数百 MB，每轮运行全量 SHA256 约 1s+。标记内容是
+# `{期望 sha256}:{文件大小}`：sha 等于本次注册表期望且大小等于当前文件才跳过哈希。
+# 旧的 `{size}:{mtime_ns}` 对不上这个格式，一律视为未命中，重新哈希后改写。
 
 def _verified_marker(ckpt: Path) -> Path:
     return ckpt.with_name(ckpt.name + ".verified")
 
 
-def _check_verified(ckpt: Path) -> bool:
-    """标记记录的 (size, mtime_ns) 与当前文件一致 → 视为已验证。"""
+def _check_verified(ckpt: Path, expected_sha: str) -> bool:
+    """标记里的 sha 等于本次期望、且大小等于当前文件 → 视为已验证。
+
+    只认 `{sha256}:{size}`。旧的 `{size}:{mtime_ns}`（不绑 sha）一律未命中。
+    """
     marker = _verified_marker(ckpt)
     try:
-        st = ckpt.stat()
-        return marker.read_text(encoding="utf-8").strip() == f"{st.st_size}:{st.st_mtime_ns}"
+        recorded = marker.read_text(encoding="utf-8").strip()
+        sha, sep, size_s = recorded.partition(":")
+        if not sep or not sha or not size_s:
+            return False
+        return sha == expected_sha and int(size_s) == ckpt.stat().st_size
     except (OSError, ValueError):
         return False
 
 
-def _mark_verified(ckpt: Path) -> None:
+def _mark_verified(ckpt: Path, expected_sha: str) -> None:
     try:
-        st = ckpt.stat()
-        _verified_marker(ckpt).write_text(f"{st.st_size}:{st.st_mtime_ns}", encoding="utf-8")
+        size = ckpt.stat().st_size
+        _verified_marker(ckpt).write_text(f"{expected_sha}:{size}", encoding="utf-8")
     except OSError:
         pass
 
@@ -369,21 +376,22 @@ def ensure_model(name: str, force: bool = False,
                  progress_callback: Callable[[int, int], bool] | None = None) -> Path:
     """确保模型权重已下载且 SHA256 匹配；返回权重路径。
 
-    校验缓存：{ckpt}.verified 标记（size+mtime）命中时跳过全量哈希。
+    校验缓存：{ckpt}.verified 记 `{期望 sha256}:{size}`，两者都对上才跳过全量哈希。
     权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
     新权重就绪（标记命中 / 哈希通过 / 下载后校验通过）才回收注册表里声明的
     退役权重（retired_filenames，见 models.py）；未就绪时不动任何文件。
     """
     info = get_model_info(name)
     ckpt = model_file(name)
+    expected_sha = info["sha256"]
 
     if ckpt.exists() and not force:
-        if _check_verified(ckpt):
+        if _check_verified(ckpt, expected_sha):
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
             _reclaim_retired(name, ckpt)
             return ckpt
-        if sha256_of(ckpt) == info["sha256"]:
-            _mark_verified(ckpt)
+        if sha256_of(ckpt) == expected_sha:
+            _mark_verified(ckpt, expected_sha)
             print(f"模型已就绪: {ckpt.name}（{ckpt.stat().st_size / 1e6:.0f} MB）")
             _reclaim_retired(name, ckpt)
             return ckpt
@@ -395,16 +403,16 @@ def ensure_model(name: str, force: bool = False,
     urls = [info["ckpt_url"], *info.get("mirror_urls", [])]
     _download(urls, ckpt, progress_callback)
     actual = sha256_of(ckpt)
-    if actual != info["sha256"]:
+    if actual != expected_sha:
         ckpt.unlink()
         # 校验失败意味着下载源可能已变更（或被劫持）：留下实际哈希，便于用户
         # 报障时确认是源变了还是网络截断。异常消息保持原样（测试会断言）。
-        _log().error("下载后 SHA256 校验失败: %s 期望 %s，实际 %s", ckpt, info["sha256"], actual)
+        _log().error("下载后 SHA256 校验失败: %s 期望 %s，实际 %s", ckpt, expected_sha, actual)
         raise RuntimeError(
-            f"SHA256 校验失败: 期望 {info['sha256']}，实际 {actual}。"
+            f"SHA256 校验失败: 期望 {expected_sha}，实际 {actual}。"
             f"下载源可能已变更，请检查 {info['ckpt_url']}"
         )
-    _mark_verified(ckpt)
+    _mark_verified(ckpt, expected_sha)
     print(f"完成: {ckpt}（{ckpt.stat().st_size / 1e6:.0f} MB）")
     _reclaim_retired(name, ckpt)
     return ckpt
@@ -557,10 +565,48 @@ def _wheel_cache_dir() -> Path:
     return d
 
 
+def _cuda_complete_marker(dest: Path) -> Path:
+    return dest / ".complete"
+
+
+def _wheel_sha_sidecar(wheel: Path) -> Path:
+    """已通过校验的 wheel 旁的侧车：内容是期望 sha256。"""
+    return wheel.with_name(wheel.name + ".sha256")
+
+
+def _cuda_wheel_cached(wheel: Path, expected_sha: str) -> bool:
+    """wheel 在且侧车记录的 sha 等于本次期望 → 不必再下载。"""
+    if not wheel.is_file():
+        return False
+    try:
+        recorded = _wheel_sha_sidecar(wheel).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return recorded == expected_sha
+
+
 def cuda_torch_installed(base: Path | None = None) -> bool:
-    """CUDA 引擎是否已安装（{base}/torch_cuda/torch/__init__.py 存在）。"""
+    """CUDA 引擎是否已安装。
+
+    新安装：`torch_cuda/.complete` 与 `torch/__init__.py` 都在。
+    旧的完整安装没有标记：`torch/__init__.py` 与 `torch/version.py` 都在则视为
+    已安装，并补写 `.complete`（避免用户重下 3.3GB）。只有残缺目录
+    （有 `__init__.py` 但没有 `version.py`，或正式目录缺关键文件）不算已安装。
+    """
     base = Path(base) if base else repo_root()
-    return (base / "torch_cuda" / "torch" / "__init__.py").exists()
+    dest = base / "torch_cuda"
+    init_py = dest / "torch" / "__init__.py"
+    marker = _cuda_complete_marker(dest)
+    if marker.is_file() and init_py.is_file():
+        return True
+    version_py = dest / "torch" / "version.py"
+    if init_py.is_file() and version_py.is_file():
+        try:
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            _log().warning("无法补写 CUDA 完成标记（仍视为已安装）: %s", marker)
+        return True
+    return False
 
 
 def cuda_engine_supported(platform_str: str | None = None, version_info=None,
@@ -623,12 +669,15 @@ def install_cuda_torch(base: Path | None = None,
                        machine: str | None = None, pointer_size: int | None = None) -> Path:
     """下载并安装 CUDA 推理引擎到 {base}/torch_cuda（与应用同目录）。
 
-    流程：已安装则直接返回 → 环境匹配检查 → _download（多段并发 + 断点续传
-    + 镜像回退）→ SHA256 校验（不匹配删缓存并报错）→ zipfile 解压（压缩字节
-    进度，与下载阶段同尺度，进度条不回跳）→ 裁剪 .lib/include/bin。
+    流程：已安装则直接返回 → 环境匹配检查 → wheel 已在且侧车 sha 匹配则跳过
+    下载，否则 _download（多段并发 + 断点续传 + 镜像回退）→ SHA256 校验
+    （不匹配删缓存并报错，消息含完整哈希与 URL；通过后把期望 sha 写到 wheel
+    旁的侧车）→ 解压到 {base}/torch_cuda.partial（不先建正式目录）→ 裁剪
+    .lib/include/bin → 换成正式目录，最后写 torch_cuda/.complete。
 
     已安装判断在环境门槛之前：装好的引擎不因解释器换代/换机而被判不支持，
-    重复调用必须幂等返回，不再做任何环境检查。
+    重复调用必须幂等返回，不再做任何环境检查。残缺目录不算已安装，成功时
+    先清掉正式目录再换上临时目录里的完整树。
 
     环境检查在下载之前：wheel 只有 cp312/win_amd64 一款，不匹配时必须在花掉
     3.3 GB 之前就报出可行动的错误（见 cuda_engine_requirements）。
@@ -637,8 +686,12 @@ def install_cuda_torch(base: Path | None = None,
     可注入而存在，生产路径一律走默认值（即真实 sys.platform / sys.version_info /
     platform.machine() / struct.calcsize("P")）。
 
+    解压或换目录任一步失败都删除临时目录；InterruptedError 继续向上抛。
+    取消发生在解压阶段时 wheel 与侧车都留着，下次跳过下载直接解压。
+    解压并换上正式目录成功之后才删 wheel 与侧车。
+
     progress_callback(done, total) 字节语义贯穿下载与解压阶段；返回 False
-    视为取消（抛 InterruptedError；wheel 缓存保留，下次直接从解压开始）。
+    视为取消（抛 InterruptedError）。
     """
     base = Path(base) if base else repo_root()
     dest = base / "torch_cuda"
@@ -649,7 +702,7 @@ def install_cuda_torch(base: Path | None = None,
     req = cuda_engine_requirements(platform_str=platform_str, version_info=version_info,
                                    machine=machine, pointer_size=pointer_size)
     wheel = _wheel_cache_dir() / req.wheel
-    print(f"下载 CUDA 推理引擎（{req.wheel}，约 3.3 GB，多段并行 + 镜像回退）…")
+    sidecar = _wheel_sha_sidecar(wheel)
     download_total = 0
 
     def _track_download(done: int, total: int) -> bool:
@@ -658,31 +711,40 @@ def install_cuda_torch(base: Path | None = None,
         download_total = total
         return True if progress_callback is None else progress_callback(done, total)
 
-    _download(req.urls, wheel, _track_download)
-    actual = sha256_of(wheel)
-    if actual != req.sha256:
-        wheel.unlink(missing_ok=True)
-        wheel.with_suffix(wheel.suffix + ".part").unlink(missing_ok=True)
-        _log().error("CUDA 引擎 wheel SHA256 校验失败: 期望 %s，实际 %s", req.sha256, actual)
-        raise RuntimeError(
-            f"SHA256 校验失败: 期望 {req.sha256[:16]}…，实际 {actual[:16]}…。"
-            f"下载源可能已变更，请稍后重试")
+    if _cuda_wheel_cached(wheel, req.sha256):
+        print(f"CUDA wheel 已校验，跳过下载: {wheel.name}")
+    else:
+        print(f"下载 CUDA 推理引擎（{req.wheel}，约 3.3 GB，多段并行 + 镜像回退）…")
+        _download(req.urls, wheel, _track_download)
+        actual = sha256_of(wheel)
+        if actual != req.sha256:
+            wheel.unlink(missing_ok=True)
+            wheel.with_suffix(wheel.suffix + ".part").unlink(missing_ok=True)
+            sidecar.unlink(missing_ok=True)
+            _log().error("CUDA 引擎 wheel SHA256 校验失败: 期望 %s，实际 %s", req.sha256, actual)
+            sources = " ".join(req.urls)
+            raise RuntimeError(
+                f"SHA256 校验失败: 期望 {req.sha256}，实际 {actual}。"
+                f"下载源可能已变更，请检查 {sources}")
+        sidecar.write_text(req.sha256, encoding="utf-8")
 
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-
-    # 手动迭代解压（extractall 无进度回调；3.3GB 解压约 1-2 分钟需可见进度）。
-    # 进度按压缩字节累计并接续下载阶段（同一 total 尺度，进度条连续不回跳）。
+    # 解压到临时目录，成功后再换成正式 torch_cuda。先建正式目录再往里解，
+    # 中断时 torch/__init__.py 会先落盘，cuda_torch_installed() 会误判已就绪。
+    partial = base / "torch_cuda.partial"
     import zipfile
 
     offset = download_total
     try:
+        if partial.exists():
+            shutil.rmtree(partial)
+        partial.mkdir(parents=True)
+        # 手动迭代解压（extractall 无进度回调；3.3GB 解压约 1-2 分钟需可见进度）。
+        # 进度按压缩字节累计并接续下载阶段（同一 total 尺度，进度条连续不回跳）。
         with zipfile.ZipFile(wheel) as zf:
             total = offset + sum(i.compress_size for i in zf.infolist())
             done = last_report = offset
             for info in zf.infolist():
-                zf.extract(info, dest)
+                zf.extract(info, partial)
                 done += info.compress_size
                 if progress_callback is not None and done - last_report >= _REPORT_INTERVAL:
                     last_report = done
@@ -690,16 +752,26 @@ def install_cuda_torch(base: Path | None = None,
                         raise InterruptedError("解压已取消")
             if progress_callback is not None and last_report < total:
                 progress_callback(total, total)
-    except InterruptedError:
-        # torch/__init__.py 通常最先解压出来，留下半成品会让
-        # cuda_torch_installed() 误判"已就绪"，下次调用直接跳过安装 →
-        # 拿到一个 import 即崩的坏 torch。wheel 缓存按承诺保留。
-        _log().warning("CUDA 引擎安装已取消，删除半成品目录: %s", dest)
-        shutil.rmtree(dest, ignore_errors=True)
+        _prune_torch_install(partial)
+        if dest.exists():
+            shutil.rmtree(dest)
+        partial.rename(dest)
+        # 成功的最后一步：正式目录上的完成标记（内容为期望 sha256）
+        _cuda_complete_marker(dest).write_text(req.sha256, encoding="utf-8")
+    except BaseException as exc:
+        if isinstance(exc, InterruptedError):
+            # 解压阶段取消：临时目录清掉，wheel 与侧车留着，下次跳过下载直接解压。
+            _log().warning("CUDA 引擎安装已取消，删除半成品目录: %s", partial)
+        else:
+            _log().warning("CUDA 引擎安装失败，删除半成品目录: %s", partial)
+            if isinstance(exc, zipfile.BadZipFile):
+                # 侧车已写上但包打不开：留着会让下次跳过下载后再次失败。
+                wheel.unlink(missing_ok=True)
+                sidecar.unlink(missing_ok=True)
+        shutil.rmtree(partial, ignore_errors=True)
         raise
     wheel.unlink(missing_ok=True)
-
-    _prune_torch_install(dest)
+    sidecar.unlink(missing_ok=True)
     print(f"完成: {dest}（CUDA 引擎已安装，重启应用后生效）")
     return dest
 

@@ -1,6 +1,15 @@
 # 模型权重（默认模型 fp16 safetensors ~320MB，由 `uvr-lite download` 获取，不入 git）
 /models/
+# 未完成下载：整段 .part，以及多段并行下载的分片 .part.s0..sN（断点续传用，失败也保留）
 *.part
+*.part.s*
+
+# torch 推理引擎（dev 模式下装在仓库根：torch_cpu/ 约 700MB，torch_cuda/ 数 GB）
+# torch.ini 记录本机选了哪个引擎（UI 写入、启动时读取），各机器不同，不入 git
+/torch_cpu/
+/torch_cuda/
+/torch_cuda.partial/
+/torch.ini
 
 # 虚拟环境
 .venv/
@@ -16,9 +25,11 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+.ruff_cache/
 
 # 音频产物
 output*/
+out/
 *.wav
 *.flac
 *.mp3
@@ -32,6 +43,13 @@ graphify-out/
 # Agent/工具临时产物（权重转换实测等，可随时重建，不入 git）
 .artifacts/
 .hallmark/
+
+# 开发脚本的临时输出（scripts/analyze.py、compose.py 写 tmp/，verify_progress.py 写 _verify_out/）
+/tmp/
+/_verify_out/
+
+# 外部审查/交接草稿（本地留档即可，不入 git）
+/docs/reviews/
 
 # ZCode 客户端计划产物
 .zcode/

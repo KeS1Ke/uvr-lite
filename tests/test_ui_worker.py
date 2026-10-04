@@ -4,7 +4,13 @@ import subprocess
 import sys
 
 from uvr_lite.models import DEFAULT_MODEL
-from uvr_lite.ui.worker import SeparationParams, SeparationWorker
+from uvr_lite.ui.worker import (
+    CombineParams,
+    CombineWorker,
+    SeparationParams,
+    SeparationWorker,
+    friendly_error,
+)
 
 
 # qapp 夹具由 tests/conftest.py 提供（session 级单例，模块内不得再建）
@@ -37,6 +43,8 @@ def _run_two_files(monkeypatch, files, params: SeparationParams):
                 assert progress_callback(phase, done, total) is True
             return [path]
 
+    # 桩文件不是真音频；预检在 run() 前段，单测只关心进度，不让它挡掉 Separator。
+    monkeypatch.setattr("uvr_lite.ui.files.precheck_audio", lambda _p: True)
     # run() 内惰性 `from ..engine import Separator` → patch 定义处
     monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
     w = SeparationWorker(files, "out", params)
@@ -80,6 +88,7 @@ def _capture_engine_calls(monkeypatch, tmp_path, params):
             captured["separate"] = kw
             return [path]
 
+    monkeypatch.setattr("uvr_lite.ui.files.precheck_audio", lambda _p: True)
     monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
     f = tmp_path / "a.wav"
     f.write_bytes(b"x")
@@ -118,3 +127,97 @@ def test_params_defaults_match_previous_dict(tmp_path, monkeypatch, qapp):
     sep_kw = dict(captured["separate"])
     sep_kw.pop("progress_callback")
     assert sep_kw == {"pcm": "PCM_24", "fmt": "auto", "bigshifts": 1, "tta": False}
+
+
+def test_all_rejected_does_not_load_model(tmp_path, monkeypatch, qapp):
+    """预检全失败：不 import/构造 Separator，all_finished 只发一次。"""
+    created = []
+
+    class FakeSeparator:
+        def __init__(self, **kw):
+            created.append(kw)
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
+    f = tmp_path / "nope.wav"
+    f.write_bytes(b"not audio at all")
+    worker = SeparationWorker([f], "out", SeparationParams())
+    finished = []
+    ready = []
+    worker.precheck_ready.connect(lambda indices: ready.append(list(indices)))
+    worker.all_finished.connect(lambda *args: finished.append(args))
+    worker.run()
+    assert created == []
+    assert ready == [[]]
+    assert finished == [(0, 1, False)]
+
+
+def test_cancel_during_precheck_skips_model(tmp_path, monkeypatch, qapp):
+    """预检期间取消：当前文件之后不再继续，且不加载模型。"""
+    created = []
+
+    class FakeSeparator:
+        def __init__(self, **kw):
+            created.append(kw)
+
+    monkeypatch.setattr("uvr_lite.engine.Separator", FakeSeparator)
+    files = []
+    for name in ("a.wav", "b.wav"):
+        p = tmp_path / name
+        p.write_bytes(b"x")
+        files.append(p)
+    worker = SeparationWorker(files, "out", SeparationParams())
+
+    def _precheck(_path):
+        worker.cancel()
+        return True
+
+    monkeypatch.setattr("uvr_lite.ui.files.precheck_audio", _precheck)
+    finished = []
+    worker.all_finished.connect(lambda *args: finished.append(args))
+    worker.run()
+    assert created == []
+    assert finished == [(0, 0, True)]
+
+
+def test_engine_import_error_emits_all_finished_once(tmp_path, monkeypatch, qapp):
+    """引擎导入失败不能让 run() 空退出：恰好一次 all_finished。"""
+    monkeypatch.setattr("uvr_lite.ui.files.precheck_audio", lambda _p: True)
+    monkeypatch.setitem(sys.modules, "uvr_lite.engine", None)
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    worker = SeparationWorker([f], "out", SeparationParams())
+    finished = []
+    failed = []
+    worker.file_failed.connect(lambda idx, err: failed.append((idx, err)))
+    worker.all_finished.connect(lambda *args: finished.append(args))
+    worker.run()
+    assert len(finished) == 1
+    assert finished[0][0] == 0 and finished[0][2] is False
+    assert failed and failed[0][0] == 0
+
+
+def test_friendly_error_survives_missing_audioread(monkeypatch):
+    """audioread 导入失败不得从 friendly_error 冒出去。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "audioread" or name.startswith("audioread."):
+            raise ImportError("no audioread")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+    assert friendly_error(RuntimeError("boom")) == "RuntimeError: boom"
+
+
+def test_combine_import_error_emits_once(tmp_path, monkeypatch, qapp):
+    monkeypatch.setitem(sys.modules, "uvr_lite.mix", None)
+    worker = CombineWorker(
+        [(tmp_path / "a-vocals.wav", tmp_path / "a-instrumental.wav")],
+        str(tmp_path), CombineParams())
+    finished = []
+    worker.all_finished.connect(lambda *args: finished.append(args))
+    worker.run()
+    assert len(finished) == 1
+    assert finished[0][2] is False

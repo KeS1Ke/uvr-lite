@@ -6,6 +6,8 @@ RuntimeError（uvr_lite/__init__.py 的 ``_base_dir``）。错误分支若直接
 用户看到的是原始 traceback——正好违背该分支的存在理由。这里锁住这条路径。
 """
 
+import pytest
+
 import uvr_lite.log as L
 from uvr_lite.cli import main
 
@@ -43,6 +45,50 @@ def test_error_path_prints_log_path(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "[ERROR]" in out
     assert f"详细信息已写入日志：{tmp_path / 'logs' / 'uvr-lite.log'}" in out
+
+
+def test_keyboard_interrupt_prints_cancelled_and_returns_130(monkeypatch, capsys):
+    """命令执行中的 Ctrl+C：一行「已取消」，退出码 130，不打裸 traceback。"""
+    def _interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("uvr_lite.cli.ensure_model", _interrupt)
+
+    assert main(["download"]) == 130
+
+    captured = capsys.readouterr()
+    assert "已取消" in captured.out
+    assert "执行失败" not in captured.out
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_argparse_usage_error_stays_system_exit_2():
+    """缺必填参数仍是 argparse 的 SystemExit(2)，不能被包成退出码 1。"""
+    with pytest.raises(SystemExit) as exc:
+        main(["separate"])
+    assert exc.value.code == 2
+
+
+def test_no_subcommand_still_returns_1():
+    assert main([]) == 1
+
+
+def test_undecodable_mix_error_is_not_blank(tmp_path, capsys):
+    """空音频走到 CLI 时，「执行失败：」后面不能是空的。"""
+    vocals = tmp_path / "a-vocals.wav"
+    inst = tmp_path / "a-instrumental.wav"
+    vocals.write_bytes(b"")
+    inst.write_bytes(b"")
+
+    code = main(["mix", str(vocals), str(inst), "-o", str(tmp_path / "out")])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "mix 执行失败：" in out
+    tail = out.split("执行失败：", 1)[1].strip()
+    assert tail
+    assert "文件不是可解码的音频" in tail
 
 
 def test_success_path_unchanged(monkeypatch, capsys, tmp_path):

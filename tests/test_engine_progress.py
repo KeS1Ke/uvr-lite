@@ -47,7 +47,7 @@ def fake_ensure_model(model_name):
     return Path("fake.ckpt")
 
 
-def fake_load_model(model_name, ckpt_path, device):
+def fake_load_model(model_name, ckpt_path, device, batch_size=None):
     return object(), make_config()
 
 
@@ -65,9 +65,12 @@ def fake_bigshifts(config, model, mix, device, model_type, pbar=False, bigshifts
 
 
 def fake_apply_tta(config, model, mix, waveforms_orig, device, model_type,
-                   bigshifts=1, pbar=False, progress_cb=None):
+                   bigshifts=1, pbar=False, progress_cb=None, demix_progress_cb=None):
     n = 2
     for i in range(n):
+        # 增强进行中也要能取消；total=7 与普通 chunk 回调区分，便于断言转发。
+        if demix_progress_cb is not None:
+            demix_progress_cb(i + 1, 7)
         if progress_cb is not None:
             progress_cb(i + 1, n)
     return waveforms_orig
@@ -176,9 +179,9 @@ def test_separator_reuses_model_across_files(tmp_path, monkeypatch):
     loads = []
     real_load = engine_mod.load_model  # fixture 已换成 fake，包装计数即可
 
-    def counting_load_model(model_name, ckpt_path, device):
+    def counting_load_model(model_name, ckpt_path, device, batch_size=None):
         loads.append(model_name)
-        return real_load(model_name, ckpt_path, device)
+        return real_load(model_name, ckpt_path, device, batch_size=batch_size)
 
     monkeypatch.setattr(engine_mod, "load_model", counting_load_model)
     from uvr_lite.engine import Separator
@@ -199,6 +202,8 @@ def test_tta_phase_reported(tmp_path):
 
     separate_file(str(song), str(tmp_path / "out"), tta=True, progress_callback=cb)
     assert ("tta", 1, 2) in phases and ("tta", 2, 2) in phases
+    # TTA 内部的 chunk 回调必须透传，否则取消会延迟一整轮增强。
+    assert ("chunk", 1, 7) in phases and ("chunk", 2, 7) in phases
 
 
 # ---------- vendored 钩子 ----------
@@ -264,15 +269,22 @@ def test_bigshifts_wrapper_reports_per_pass(monkeypatch):
 
 def test_apply_tta_reports_per_augmentation(monkeypatch):
     calls = []
+    chunk_calls = []
 
     def fake_bigshifts(config, model, mix, device, model_type, pbar=False,
                        bigshifts=1, progress_cb=None, demix_progress_cb=None):
+        if demix_progress_cb is not None:
+            demix_progress_cb(1, 4)
         return {"vocals": np.zeros((2, 100))}
 
     monkeypatch.setattr("utils.model_utils.bigshifts_wrapper", fake_bigshifts)
     mix = np.random.RandomState(0).randn(2, 100)
     orig = {"vocals": np.zeros((2, 100))}
-    out = apply_tta(demix_config(), object(), mix, orig, "cpu", "bs_roformer",
-                    progress_cb=lambda d, t: calls.append((d, t)))
+    out = apply_tta(
+        demix_config(), object(), mix, orig, "cpu", "bs_roformer",
+        progress_cb=lambda d, t: calls.append((d, t)),
+        demix_progress_cb=lambda d, t: chunk_calls.append((d, t)),
+    )
     assert calls == [(1, 2), (2, 2)]
+    assert chunk_calls == [(1, 4), (1, 4)]
     assert out["vocals"].shape == (2, 100)

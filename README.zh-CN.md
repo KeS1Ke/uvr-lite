@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-![version](https://img.shields.io/badge/version-0.1.7-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.9-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -33,9 +33,9 @@ uvr-lite mix output/歌曲-vocals.flac output/歌曲-instrumental.flac -o mixed
 
 - **一键部署**：`install.bat`（Windows）/ `install.sh`（Linux/macOS）自动完成 venv + 依赖 + torch（CPU/CUDA 自动分流）+ 模型下载（SHA256 校验）+ 冒烟测试
 - **主力模型**：BS-RoFormer ep317（viperx 训练，SDR ≈ 10.9–12.9 dB），RTX 4060 上整曲（约 3 分钟）约 **51 秒**
-- **双格式输出**：FLAC（16/24 bit）或 WAV，保持 44.1 kHz 原采样率
+- **双格式输出**：FLAC（16/24 bit）或 WAV。输入会被重采样到模型采样率（这两套配置都是 44100 Hz）再写出
 - **音轨合成**：分离后的人声＋伴奏一键合回整曲（分离的逆运算）；默认精确求和（同源分离结果可还原原曲），人声/伴奏增益可调，可峰值归一化；CLI 与桌面界面均支持
-- **无训练代码**：仅推理，仓库代码 < 1 MB
+- **无训练代码**：仅推理，仓库源码约 1 MB
 - 可选多模型：`mel_band_karaoke`（Mel-Band RoFormer Karaoke，aufr33 & viperx 训练）
 
 ## 桌面界面（Windows，推荐非专业用户）
@@ -46,7 +46,7 @@ uvr-lite mix output/歌曲-vocals.flac output/歌曲-instrumental.flac -o mixed
 基础包**离线自包含**——Python、CPU 版 PyTorch、fp16 瘦身模型（320 MB，比原版 639 MB 小一半；639 MB 取自上游说明，本仓库未独立核实）全部内置，安装过程无需联网。**CUDA 引擎**（NVIDIA 显卡 GPU 加速）为可选组件，按需联网下载（半在线模式，与 UVR 官方同策略）：
 
 1. **双击安装**，选择安装位置（默认：你的用户目录）——所有文件装进一个文件夹，不会散落
-2. **可选**：有 NVIDIA 显卡的话勾选「**下载 CUDA 推理引擎**」（下载约 3.3 GB，磁盘占用约 4.9 GB）——安装中联网下载，带进度页 + SHA256 校验；不勾选也完全不影响使用，以后随时可补装
+2. **可选**：有 NVIDIA 显卡的话勾选「**下载 CUDA 推理引擎**」（下载约 3.3 GB，磁盘占用约 4.7 GB）——安装中联网下载，带进度页 + SHA256 校验；不勾选也完全不影响使用，以后随时可补装
 3. **完成**——桌面与开始菜单出现 **♪ 快捷方式**，双击即可打开界面
 4. 把歌曲拖进窗口（或选择文件夹），选好模型，点「**开始分离**」——实时进度 + 预计剩余时间；处理完的文件打 **✓**，无法识别的格式在开始前就被标 **✗** 并跳过
 
@@ -57,7 +57,7 @@ uvr-lite mix output/歌曲-vocals.flac output/歌曲-instrumental.flac -o mixed
 - **最小化到系统托盘**（可选，默认关闭）：勾选后，最小化会收到通知区域，而不是留在任务栏。点窗口关闭仍然退出。托盘菜单可以重新显示主窗口，或退出程序。
 - **暂时没有独立显卡？** 界面「**推理引擎**」区有「**下载 CUDA 引擎**」按钮（断点续传 + 多镜像回退），或在命令行运行 `uvr-lite install-cuda`——想什么时候装都行，无需重装
 - **升级**：重新运行安装程序即可——原地覆盖更新，保留你的设置
-- **卸载**：控制面板 → 程序和功能 → uvr-lite（或运行安装目录下的 `Uninstall.exe`）——删除快捷方式、注册表与安装目录
+- **卸载**：控制面板 → 程序和功能 → uvr-lite，或开始菜单「卸载 uvr-lite」，或安装目录里的 `unins000.exe`。会删除快捷方式、注册表与安装目录；安装目录中的 logs 卸载时保留
 - 界面为中文（面向亲友设计的）；命令行用法见下文，供高级用户使用
 
 ## 快速开始
@@ -84,6 +84,7 @@ bash install.sh
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat（PowerShell: .venv\Scripts\Activate.ps1）
 pip install -e ".[ui]"                               # [ui] = 图形界面依赖（PySide6）；只要命令行可去掉
 uvr-lite download                                    # 下载模型（约 320 MB）
+uvr-lite ui                                          # 启动桌面界面
 ```
 
 ## 用法
@@ -129,8 +130,9 @@ uvr-lite separate song.flac -m mel_band_karaoke
 # 低显存 GPU：调小批大小防 OOM
 uvr-lite separate song.flac --batch-size 1
 
-# 质量/速度开关：1 = 无重叠（约 2 倍提速），2 = 默认，更大更稳
-uvr-lite separate song.flac --num-overlap 1
+# 质量档：fast / standard / high = 重叠 1 / 2 / 4。
+# CPU 建议 fast，要更干净用 high。不要和 --num-overlap 一起用。
+uvr-lite separate song.flac --quality fast
 
 # 音轨合成：人声＋伴奏合回整曲（默认精确求和）
 uvr-lite mix output/song-vocals.flac output/song-instrumental.flac -o mixed
@@ -154,8 +156,11 @@ uvr-lite install-cuda
 | `--device` | `auto`（默认）/ `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | 圆形时移平均次数，>1 提升质量、线性增耗时（默认 1） |
 | `--batch-size N` | 推理批大小（默认取模型配置）；低显存 GPU 可设 `1` 防 OOM |
-| `--num-overlap N` | 重叠窗口数（质量/速度开关）：`1` 最快约 2 倍；默认取模型配置（主力 2 / karaoke 4），显式传值才覆盖 |
+| `--quality` | `fast` / `standard` / `high`（重叠 1 / 2 / 4）。CPU 建议 fast，要更干净用 high。默认档是 standard（重叠 2）。与 `--num-overlap` 不能同时使用 |
+| `--num-overlap N` | 显式重叠数。与 `--quality` 都不传时用模型配置（ep317 为 2；karaoke 配置自身的 overlap 是 4）。传入 `--quality`，或界面上的质量档，会显式覆盖该配置 |
 | `--tta` | 测试时增强（极性/声道反转平均，3 倍耗时，默认关） |
+
+`bs_roformer_ep317` 已是本应用的人声模型。`mel_band_karaoke` 分离的是主唱与和声，不是更纯的人声/伴奏分离。重叠越大接缝越干净：fast（重叠 1）适合 CPU，standard（重叠 2）是默认档，high（重叠 4）更干净、耗时约为标准的两倍。karaoke 模型配置自身的 overlap 是 4，但界面质量档（或 `--quality`）会显式覆盖它。
 
 `mix` 子命令参数：
 
@@ -175,14 +180,14 @@ uvr-lite install-cuda
 
 - **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
-- **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.9 GB
+- **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.7 GB
 - **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
 - **CUDA 引擎的 Python 版本**：内置 wheel 只有 `cp312/win_amd64` 一款，因此 `install-cuda`（及界面里的下载按钮）要求 **64 位 Windows + Python 3.12**——官方安装包内置的正是这个版本。其他 Python 版本会在下载前就被拦下并给出说明，不会白下 3.3 GB 装不上；CPU 引擎不受影响。想在别的环境用显卡加速，从 PyPI 装 CUDA 版 torch 即可：`pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## 工作原理
 
 ```
-输入音频 → soundfile+soxr 解码 (44.1kHz，m4a 兜底 audioread) → （可选归一化）
+输入音频 → soundfile+soxr 解码（m4a 兜底 audioread）→ 重采样到模型采样率（这两套配置都是 44100 Hz）→ （可选归一化）
        → BigShifts 圆形时移平均 → BS-RoFormer 前向（vocals 掩码）
        → instrumental = 原混合 − vocals（数学无损）
        → soundfile 写 FLAC/WAV
@@ -211,7 +216,8 @@ uvr-lite/
 │   ├── errors.py      #   共享取消异常
 │   ├── models.py      #   模型注册表（URL + SHA256）
 │   ├── download.py    #   流式下载 + 完整性校验 + CUDA 引擎安装
-│   └── configs/       #   模型配置 yaml
+│   ├── configs/       #   模型配置 yaml
+│   └── ui/            #   桌面界面（PySide6）
 ├── msst/              # vendored 推理引擎（ZFTurbo MSST 裁剪子集，MIT）
 ├── install.bat|sh     # 一键安装脚本
 └── scripts/           # 可选配套：analyze（DSP 分析）/ compose（算法作曲）/ render_spectro（频谱图）
@@ -238,4 +244,4 @@ uvr-lite/
 
 ## 许可
 
-MIT License。详见 [LICENSE](LICENSE)。`msst/` 子目录保留 ZFTurbo MSST 的原始版权声明。
+MIT License。详见 [LICENSE](LICENSE)。`msst/` 来自 ZFTurbo Music-Source-Separation-Training（MIT），部分文件未保留上游版权头，署名见 [msst/NOTICE.md](msst/NOTICE.md)。

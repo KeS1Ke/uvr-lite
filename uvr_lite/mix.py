@@ -5,10 +5,11 @@
 不归一化即可近似无损还原原曲。
 
 progress_callback(phase, done, total) -> bool 与分离引擎同契约：
-phase 为 "decode" / "mix" / "write"；返回 False 时抛 CancelledError 并清理
-已写出的半成品。
+phase 为 "decode" / "mix" / "write"；返回 False 时抛 CancelledError，并删掉
+本次已替换成功的成品。半成品只写在 `{最终名}.part`，异常时删掉，不占用成品名。
 """
 
+import os
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -64,6 +65,11 @@ def _mix_output_path(out_dir: Path, stem: str, codec: str) -> Path:
     return candidate
 
 
+def _unlink_quiet(path: Path) -> None:
+    with suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
 def combine(
     vocals: str | Path,
     instrumental: str | Path,
@@ -79,10 +85,11 @@ def combine(
 ) -> Path:
     """把人声与伴奏合成为一个文件，返回写出路径。
 
-    采样率取两者较高值；声道数取较大者（单声道自动复制）；长度按最长
-    补零/截断（同源分离结果天然等长）。normalize=False 时保持精确求和。
-    文件名默认 `{stem}-mix.{ext}`；该路径已存在时从 `{stem}-mix-2.{ext}`
-    起递增，避免截断已有文件。
+    采样率取两者较高值；声道数取较大者（单声道自动复制）；两侧都不是
+    单声道且声道数不同时抛出 ValueError。长度按最长补零/截断（同源分离
+    结果天然等长）。normalize=False 时保持精确求和。文件名默认
+    `{stem}-mix.{ext}`；该路径已存在时从 `{stem}-mix-2.{ext}` 起递增，
+    避免截断已有文件。写出先落 `{最终名}.part`，成功后再替换。
     """
     vocals = Path(vocals)
     instrumental = Path(instrumental)
@@ -114,15 +121,33 @@ def combine(
 
     channels = max(voc.shape[0], inst.shape[0])
     frames = max(voc.shape[1], inst.shape[1])
+    voc_ch = int(voc.shape[0])
+    inst_ch = int(inst.shape[0])
+    # 单声道可以复制；2ch+4ch 这类对不上时不要把 numpy 的 broadcast 错误抛出去
+    if voc_ch != inst_ch and voc_ch != 1 and inst_ch != 1:
+        raise ValueError(
+            f"声道数对不上，无法合成：人声 {voc_ch} 声道，伴奏 {inst_ch} 声道"
+            "（只有单声道可以复制到另一侧）"
+        )
     voc = _fit_length(_fit_channels(voc, channels), frames)
     inst = _fit_length(_fit_channels(inst, channels), frames)
 
     _cb("mix", 0, 1)
     mixed = voc * float(vocal_gain) + inst * float(inst_gain)
     peak = float(np.abs(mixed).max()) if mixed.size else 0.0
-    if normalize and peak > 0:
-        mixed = mixed * (0.891 / peak)  # 峰值 -1 dBFS
-        peak = float(np.abs(mixed).max())
+    # peak<=0 或 <1e-4 视为静音，不放大；否则增益不超过 100
+    silent = peak <= 0 or peak < 1e-4
+    if normalize and not silent:
+        gain = 0.891 / peak
+        if gain > 100.0:
+            gain = 100.0
+            if verbose:
+                print(
+                    "  警告: 峰值过低，归一化增益已限制为 100"
+                    f"（当前峰值 {peak:.6g}，不再放大到 -1 dBFS）"
+                )
+        mixed = mixed * gain
+        peak = float(np.abs(mixed).max()) if mixed.size else 0.0
     elif peak > 1.0 and verbose:
         print(f"  警告: 峰值 {peak:.3f} 超过 0 dBFS，整数格式会削波"
               "（可勾选/传入峰值归一化）")
@@ -132,18 +157,24 @@ def combine(
     # 这里只对齐行为；要真正避免削波请用 normalize）
     codec = "flac" if (fmt == "flac" or (fmt == "auto" and peak <= 1.0)) else "wav"
     out_path = _mix_output_path(out_dir, _output_stem(vocals, out_name), codec)
+    # 扩展名是 .part 时 soundfile 无法从文件名判断格式，必须显式传入 format
+    part_path = out_path.with_name(out_path.name + ".part")
 
     written: list[Path] = []
     try:
         _cb("write", 0, 1)
-        sf.write(out_path, mixed.T, target_sr, subtype=pcm)
+        sf.write(part_path, mixed.T, target_sr, subtype=pcm, format=codec.upper())
+        os.replace(part_path, out_path)
         written.append(out_path)
         if verbose:
             print(f"  写出: {out_path}（峰值 {peak:.3f}）")
         _cb("write", 1, 1)
     except CancelledError:
+        _unlink_quiet(part_path)
         for p in written:
-            with suppress(OSError):
-                p.unlink(missing_ok=True)
+            _unlink_quiet(p)
+        raise
+    except (KeyboardInterrupt, Exception):
+        _unlink_quiet(part_path)
         raise
     return out_path

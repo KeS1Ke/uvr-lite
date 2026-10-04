@@ -7,8 +7,11 @@ harness，用完即弃；这里固化成用例，改 install.iss 或 pyproject.t
 """
 
 import hashlib
+import io
 import re
+import shutil
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -183,3 +186,115 @@ def test_pyproject_dependencies_block_missing_is_fatal(packaging_root):
                                                    encoding="utf-8")
     with pytest.raises(SystemExit, match="dependencies"):
         bi._check_packaging_consistency()
+
+
+def _write_tar(path: Path, members: list[tuple[str, bytes | None]]) -> None:
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tf.addfile(info)
+            else:
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+
+
+def test_green_python_bad_sha_deletes_archive(tmp_path, monkeypatch):
+    """SHA256 不符：删掉坏 tar，且不得解压。哈希在解压之前。"""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    src = tmp_path / "ok.tar.gz"
+    _write_tar(src, [("python/Lib/ok.py", b"print(1)\n")])
+    monkeypatch.setattr(bi, "GREEN_PY_SHA256", "0" * 64)
+
+    def fake_dl(urls, dest, progress_cb=None):
+        shutil.copyfile(src, dest)
+
+    monkeypatch.setattr(bi, "_download_to", fake_dl)
+    with pytest.raises(SystemExit, match="校验失败"):
+        bi._download_green_python(bundle)
+    assert not (bundle / bi.GREEN_PY_FILENAME).exists()
+    assert not (bundle / "python").exists()
+
+
+def test_green_python_extracts_prefixed_members(tmp_path, monkeypatch):
+    """python/ 前缀剥掉后落在 bundle/python 下，压缩包在成功后删除。"""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    src = tmp_path / "ok.tar.gz"
+    _write_tar(src, [
+        ("python", None),
+        ("python/Lib/ok.py", b"ok"),
+        ("python/python.exe", b"exe"),
+    ])
+    monkeypatch.setattr(bi, "GREEN_PY_SHA256", bi.sha256_of(src))
+
+    def fake_dl(urls, dest, progress_cb=None):
+        shutil.copyfile(src, dest)
+
+    monkeypatch.setattr(bi, "_download_to", fake_dl)
+    bi._download_green_python(bundle)
+    assert (bundle / "python" / "Lib" / "ok.py").read_bytes() == b"ok"
+    assert (bundle / "python" / "python.exe").read_bytes() == b"exe"
+    assert not (bundle / "python" / "python").exists()
+    assert not (bundle / bi.GREEN_PY_FILENAME).exists()
+
+
+@pytest.mark.parametrize("name", [
+    "/abs/evil.txt",
+    "C:/Windows/evil.txt",
+    "D:evil.txt",
+    "python/../../outside.txt",
+    "python/foo/../../outside.txt",
+    "../outside.txt",
+    "python/C:/evil.txt",
+])
+def test_green_python_rejects_unsafe_member(tmp_path, monkeypatch, name):
+    """绝对路径、盘符，以及去掉 python/ 前缀后仍含 .. 的成员名都拒绝。"""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    src = tmp_path / "bad.tar.gz"
+    _write_tar(src, [(name, b"evil"), ("python/Lib/ok.py", b"ok")])
+    monkeypatch.setattr(bi, "GREEN_PY_SHA256", bi.sha256_of(src))
+
+    def fake_dl(urls, dest, progress_cb=None):
+        shutil.copyfile(src, dest)
+
+    monkeypatch.setattr(bi, "_download_to", fake_dl)
+    with pytest.raises(SystemExit, match="不安全路径"):
+        bi._download_green_python(bundle)
+    assert not (bundle / "python" / "Lib" / "ok.py").exists()
+    assert not (tmp_path / "outside.txt").exists()
+    assert not (tmp_path / "evil.txt").exists()
+    assert not (bundle / "outside.txt").exists()
+
+
+def test_drop_verified_markers_keeps_weights(tmp_path):
+    """只删 *.verified，仓库/目录里的权重文件必须留下。"""
+    models = tmp_path / "models"
+    nested = models / "nested"
+    nested.mkdir(parents=True)
+    weight = models / "m.safetensors"
+    weight.write_bytes(b"weights")
+    (models / "m.safetensors.verified").write_text("abc:1", encoding="utf-8")
+    (nested / "x.verified").write_text("nope", encoding="utf-8")
+    bi._drop_verified_markers(models)
+    assert weight.read_bytes() == b"weights"
+    assert list(models.rglob("*.verified")) == []
+
+
+def test_installer_excludes_verified_and_cuda_failure_continues():
+    """安装脚本：模型排除 *.verified；CUDA 下载失败不中止安装。"""
+    text = (ROOT / "installer" / "install.iss").read_text(encoding="utf-8")
+    models = [ln for ln in text.splitlines() if r"{#BundleDir}\models" in ln]
+    assert models and all("*.verified" in ln for ln in models)
+    assert "RaiseException" not in text
+    assert "CudaDownloadOK" in text
+    assert "CUDA 未安装，可稍后在应用内补装" in text
+    assert r"torch_cuda\.complete" in text
+    assert r"torch\version.py" in text
+    assert r"DirExists(ExpandConstant('{app}\torch_cuda\torch'))" not in text
+    cuda_files = [ln for ln in text.splitlines() if "ExternalSize:" in ln]
+    assert len(cuda_files) == 1
+    assert "CudaExtractReady" in cuda_files[0]

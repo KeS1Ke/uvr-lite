@@ -88,6 +88,39 @@ def test_pair_stems_equal_counts_keeps_only_first_pair(tmp_path):
     assert result_dirs.unmatched == []
 
 
+def test_pair_stems_groups_relative_and_absolute_same_dir(tmp_path, monkeypatch):
+    """相对路径与绝对路径、以及带 .. 的路径，resolve 后同一目录要分在一组。"""
+    monkeypatch.chdir(tmp_path)
+    album = tmp_path / "album"
+    album.mkdir()
+    rel = Path("album") / "song-vocals.flac"
+    abs_inst = (album / "song-instrumental.wav").resolve()
+
+    result = pair_stems([rel, abs_inst])
+
+    assert len(result.pairs) == 1
+    assert result.pairs[0].vocals == rel
+    assert result.pairs[0].instrumental == abs_inst
+    assert result.unmatched == []
+
+    nested = album / "nested"
+    via_parent = nested / ".." / "other-vocals.flac"
+    direct = album / "other-instrumental.flac"
+    assert str(via_parent.parent) != str(direct.parent)
+    dotted = pair_stems([via_parent, direct])
+    assert len(dotted.pairs) == 1
+    assert dotted.unmatched == []
+
+    # 调用方已经 resolve 过的路径，配对结果不变
+    resolved = pair_stems([
+        (album / "song-vocals.flac").resolve(),
+        (album / "song-instrumental.wav").resolve(),
+    ])
+    assert len(resolved.pairs) == 1
+    assert resolved.pairs[0].vocals == (album / "song-vocals.flac").resolve()
+    assert resolved.unmatched == []
+
+
 def test_find_stem_pairs_scans_folder(tmp_path):
     (tmp_path / "a-vocals.flac").write_bytes(b"x")
     (tmp_path / "a-instrumental.flac").write_bytes(b"x")

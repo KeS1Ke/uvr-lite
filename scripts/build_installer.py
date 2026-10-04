@@ -119,37 +119,77 @@ def _download_to(urls: list[str], dest: Path,
 
 # ---------- bundle 准备 ----------
 
+_TAR_DRIVE = re.compile(r"^[A-Za-z]:")
+
+
+def _green_python_relpath(member_name: str) -> str | None:
+    """成员名 → bundle/python 下的相对路径。
+
+    拒绝绝对路径、盘符，以及去掉 ``python/`` 前缀后仍含 ``..`` 的名字。
+    ``python`` 根目录本身返回 None（跳过，不落盘）。
+    """
+    name = member_name.replace("\\", "/")
+    if name.startswith("/") or _TAR_DRIVE.match(name):
+        raise SystemExit(f"绿色 Python 压缩包含不安全路径，已拒绝: {member_name}")
+    if name.startswith("python/"):
+        name = name[len("python/"):]
+    elif name == "python":
+        return None
+    if not name:
+        return None
+    if name.startswith("/") or _TAR_DRIVE.match(name) or ".." in name.split("/"):
+        raise SystemExit(f"绿色 Python 压缩包含不安全路径，已拒绝: {member_name}")
+    return name
+
+
 def _download_green_python(bundle_dir: Path) -> None:
-    """下载并解压绿色 Python 到 bundle/python/（SHA256 校验）。"""
+    """下载并解压绿色 Python 到 bundle/python/（先 SHA256，再解压）。
+
+    校验不符时删除坏 tar 再退出。解压拒绝绝对路径、盘符，以及去掉
+    ``python/`` 前缀后仍含 ``..`` 的成员名。
+    """
     dest = bundle_dir / "python"
     archive = bundle_dir / GREEN_PY_FILENAME
     print("[1/5] 下载内置 Python（约 50MB，SHA256 校验）…")
     _download_to(GREEN_PY_URLS, archive)
     actual = sha256_of(archive)
     if actual != GREEN_PY_SHA256:
+        archive.unlink(missing_ok=True)
         raise SystemExit(f"绿色 Python 校验失败: 期望 {GREEN_PY_SHA256[:16]}…，实际 {actual[:16]}…")
-    dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:gz") as tf:
+        planned: list[tuple[tarfile.TarInfo, str]] = []
         for member in tf.getmembers():
-            name = member.name
-            if name.startswith("python/"):
-                name = name[len("python/"):]
-            elif name == "python":
+            rel = _green_python_relpath(member.name)
+            if rel is None:
                 continue
-            if not name:
-                continue
-            target = dest / name
+            planned.append((member, rel))
+        dest.mkdir(parents=True, exist_ok=True)
+        for member, rel in planned:
+            target = dest / rel
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                src = tf.extractfile(member)
-                if src is None:
-                    continue
-                with open(target, "wb") as f:
-                    while chunk := src.read(1 << 20):
-                        f.write(chunk)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            with open(target, "wb") as f:
+                while chunk := src.read(1 << 20):
+                    f.write(chunk)
     archive.unlink(missing_ok=True)
+
+
+def _drop_verified_markers(models: Path) -> None:
+    """删掉模型目录里的 *.verified。不碰权重本身。
+
+    ensure_model 会在校验通过后把标记写进 UVR_MODEL_DIR。那是本机缓存，
+    不进安装包（install.iss 对 models 另有 Excludes 兜底）。
+    """
+    if not models.is_dir():
+        return
+    for marker in models.rglob("*.verified"):
+        if marker.is_file():
+            marker.unlink()
 
 
 def _pip(python_exe: Path, specs: list[str], index: str = PIP_INDEX,
@@ -423,6 +463,8 @@ def prepare_bundle(bundle_dir: Path) -> None:
     model_file = bundle_dir / "models" / get_model_info(DEFAULT_MODEL).get(
         "filename", f"{DEFAULT_MODEL}.ckpt")
     ensure_model(DEFAULT_MODEL)
+    # 标记写在 bundle 的 models/ 里，不是仓库 models/。只删缓存，不删权重。
+    _drop_verified_markers(bundle_dir / "models")
     print(f"[4/5] 模型: {model_file}")
 
 

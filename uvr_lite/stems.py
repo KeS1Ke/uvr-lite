@@ -55,10 +55,11 @@ def split_stem(path: Path) -> tuple[str, str] | None:
 
 
 def pair_stems(paths: Iterable[Path]) -> PairResult:
-    """按 (父目录, 基名小写) 配对，按名称排序；同基名多候选时取名称靠前者。
+    """按 (resolve 后的父目录, 基名小写) 配对，按名称排序；同基名多候选时取名称靠前者。
 
     同一基名出现多个同类文件（如 flac/wav 副本）时，只配最先的一对，
     其余进 unmatched——宁可让用户手动处理，也不静默挑错文件。
+    相对路径与绝对路径指向同一目录时分在一组；已经 resolve 过的路径结果不变。
     """
     groups: dict[tuple[str, str], dict[str, list[Path]]] = {}
     result = PairResult()
@@ -69,7 +70,7 @@ def pair_stems(paths: Iterable[Path]) -> PairResult:
             result.ignored.append(p)
             continue
         base, kind = split
-        key = (str(p.parent), base.lower())
+        key = (str(p.resolve().parent), base.lower())
         groups.setdefault(key, {}).setdefault(kind, []).append(p)
 
     for kinds in groups.values():

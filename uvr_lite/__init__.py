@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "0.1.7"
+__version__ = "0.1.9"
 
 
 def _base_dir() -> Path:

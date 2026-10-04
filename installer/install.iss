@@ -8,8 +8,10 @@
 ;     cu128 wheel（约 3.3 GB，DownloadTemporaryFile 自带进度页 + SHA256 校验），
 ;     [Files] extractarchive 原生解压到 {app}\torch_cuda，装完裁剪
 ;     .lib/include/bin（省约 900 MB）；镜像源详见 CUDA_URL 注释。
-;     取消勾选/下载失败不影响安装（可在应用内「推理引擎」区或 CLI
-;     `uvr-lite install-cuda` 随时补装——复用多段并发+断点续传+镜像回退下载器）
+;     取消勾选则不下载。下载失败（返回值 < 0，或 DownloadTemporaryFile 抛异常）
+;     不中止安装：记下失败并跳过解压，装完后若仍无完整引擎，弹出可抑制提示。
+;     可在应用内「推理引擎」区或 CLI `uvr-lite install-cuda` 随时补装
+;     （复用多段并发+断点续传+镜像回退下载器）
 ;   - 推理引擎（CPU/CUDA）由应用内选择（torch.ini），启动时切换
 ;   - 快捷方式：桌面 + 开始菜单（♪），指向 pythonw -m uvr_lite.ui
 ;   - 卸载：控制面板/卸载器，删除快捷方式 + 注册表（含 QSettings 残留）+ 安装目录
@@ -75,10 +77,10 @@ Source: "{#BundleDir}\app\*"; DestDir: "{app}\app"; Flags: recursesubdirs create
 Source: "{#BundleDir}\python\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion
 ; CPU torch（应用内选择，启动时切换）→ torch_cpu/
 Source: "{#BundleDir}\torch_cpu\*"; DestDir: "{app}\torch_cpu"; Flags: recursesubdirs createallsubdirs ignoreversion
-; CUDA torch（勾选附加任务时由 [Code] 下载到 {tmp}，此处原生解压到 torch_cuda/）
-Source: "{tmp}\torch-2.7.1+cu128-cp312-cp312-win_amd64.zip"; DestDir: "{app}\torch_cuda"; ExternalSize: 3273024349; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion; Check: CudaTaskSelected
-; 模型权重 → {app}\models
-Source: "{#BundleDir}\models\*"; DestDir: "{app}\models"; Flags: recursesubdirs createallsubdirs ignoreversion
+; CUDA torch（勾选附加任务且本次下载成功才解压；失败不要求 {tmp} 里有 wheel）
+Source: "{tmp}\torch-2.7.1+cu128-cp312-cp312-win_amd64.zip"; DestDir: "{app}\torch_cuda"; ExternalSize: 3273024349; Flags: external extractarchive recursesubdirs createallsubdirs ignoreversion; Check: CudaExtractReady
+; 模型权重 → {app}\models（*.verified 是本机校验缓存，不进安装包）
+Source: "{#BundleDir}\models\*"; DestDir: "{app}\models"; Excludes: "*.verified"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 ; 快捷方式：桌面 + 开始菜单（♪），WorkingDir=app 使 -m uvr_lite.ui 命中快照代码
 [Icons]
@@ -108,12 +110,26 @@ const
 
 var
   ProgressPage: TOutputProgressWizardPage;
+  CudaDownloadOK: Boolean;
+
+function CudaEnginePresent: Boolean;
+begin
+  // 完整引擎才跳过下载：完成标记，或旧安装里的 torch/version.py。
+  // 只有 torch 目录（半成品常已有 __init__.py）不算已装。
+  Result := FileExists(ExpandConstant('{app}\torch_cuda\.complete'))
+    or FileExists(ExpandConstant('{app}\torch_cuda\torch\version.py'));
+end;
 
 function CudaTaskSelected: Boolean;
 begin
-  // 勾选且尚未装过 CUDA 引擎（升级/重装场景已存在则跳过，避免重下 3.3GB）
-  Result := WizardIsTaskSelected('cuda')
-    and not DirExists(ExpandConstant('{app}\torch_cuda\torch'));
+  // 勾选且尚未装过完整 CUDA 引擎（升级/重装已就绪则跳过，避免重下 3.3GB）
+  Result := WizardIsTaskSelected('cuda') and not CudaEnginePresent;
+end;
+
+function CudaExtractReady: Boolean;
+begin
+  // [Files] 只在本次下载成功时解压。失败或已装过都不碰这条外部文件。
+  Result := WizardIsTaskSelected('cuda') and CudaDownloadOK;
 end;
 
 // 下载进度回调 → 进度页进度条。注意：Inno 7 的 CreateDownloadPage
@@ -223,14 +239,20 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
-    // 勾选附加任务且未装过才下载；文件复制阶段开始前 wheel 必须已在 {tmp}
+    // 勾选且未装过完整引擎才下载。文件复制前 wheel 必须已在 {tmp}（仅下载成功时）。
+    // 返回值 < 0 或 Inno 抛异常都只记下失败，安装继续，不中止。
     if CudaTaskSelected then
     begin
       ProgressPage.Show;
       try
         ProgressPage.SetProgress(0, 0);
-        if DownloadTemporaryFile(CUDA_URL, CUDA_WHEEL, CUDA_SHA, @OnCudaDownloadProgress) < 0 then
-          RaiseException('CUDA 引擎下载失败，可在应用内重试');
+        CudaDownloadOK := False;
+        try
+          if DownloadTemporaryFile(CUDA_URL, CUDA_WHEEL, CUDA_SHA, @OnCudaDownloadProgress) >= 0 then
+            CudaDownloadOK := True;
+        except
+          CudaDownloadOK := False;
+        end;
       finally
         ProgressPage.Hide;
       end;
@@ -238,11 +260,14 @@ begin
   end;
   if CurStep = ssPostInstall then
   begin
-    // [Files] extractarchive 解压完成后裁剪。注意不能用 CudaTaskSelected：
-    // 其 DirExists 检查在此时已因刚解压的目录而误判（返回 False 跳过裁剪）。
-    // 裁剪幂等——升级场景勾选但已有旧目录时同样安全。
+    // [Files] extractarchive 解压完成后裁剪。不要用 CudaTaskSelected：
+    // 引擎一旦就绪它就返回 False，刚解压出的 version.py 会让裁剪被跳过。
+    // 裁剪幂等——升级时勾了任务、目录已在，同样安全。
     if WizardIsTaskSelected('cuda') then
       PruneTorchCuda(ExpandConstant('{app}\torch_cuda'));
+    // 勾了 CUDA 但下载没成功，并且还没有完整引擎：安装继续，只提示可稍后补装。
+    if WizardIsTaskSelected('cuda') and (not CudaDownloadOK) and (not CudaEnginePresent) then
+      SuppressibleMsgBox('CUDA 未安装，可稍后在应用内补装。', mbInformation, MB_OK, IDOK);
   end;
 end;
 

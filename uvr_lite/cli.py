@@ -1,4 +1,7 @@
-"""命令行入口：uvr-lite separate / mix / download / models / version。"""
+"""命令行入口：uvr-lite separate / mix / download / models / ui / install-cuda。
+
+版本只有顶层 --version，没有 version 子命令。
+"""
 
 import argparse
 import sys
@@ -8,9 +11,17 @@ from . import __version__
 from .download import ensure_model, model_file, retired_model_files
 from .log import log_exception, log_hint
 from .models import DEFAULT_MODEL, MODEL_REGISTRY
+from .quality import QUALITY_CHOICES, quality_overlap
 
 
 def _cmd_separate(args: argparse.Namespace) -> int:
+    overlap = args.num_overlap
+    if args.quality is not None and overlap is not None:
+        print("[ERROR] 不能同时使用 --quality 与 --num-overlap，请只保留其中一个。")
+        return 2
+    if args.quality is not None:
+        overlap = quality_overlap(args.quality)
+
     pcm = f"PCM_{args.pcm}"
     # 全量安装包含 CPU/CUDA 两套 torch：--device 指定二进制，必须在
     # engine（import torch）之前切换（惰性 import）
@@ -22,7 +33,7 @@ def _cmd_separate(args: argparse.Namespace) -> int:
 
     # 会话复用：模型只加载一次，全部输入文件共用（避免每文件重载权重）
     sep = Separator(model_name=args.model, device=args.device,
-                    batch_size=args.batch_size, num_overlap=args.num_overlap)
+                    batch_size=args.batch_size, num_overlap=overlap)
     for inp in args.input:
         sep.separate(
             inp, args.out, pcm=pcm,
@@ -142,9 +153,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="圆形时移平均次数（>1 提升质量但线性增耗时，默认 1）")
     p_sep.add_argument("--batch-size", type=int, default=None,
                        help="推理批大小（默认取模型配置；低显存 GPU 可设 1 防 OOM）")
-    p_sep.add_argument("--num-overlap", type=int, default=None,
-                       help="重叠窗口数（质量/速度开关：1 最快约 2x；默认取模型配置"
-                            "（主力 2 / karaoke 4），显式传值才覆盖）")
+    p_sep.add_argument(
+        "--quality",
+        choices=QUALITY_CHOICES,
+        default=None,
+        help="质量档：fast 重叠 1、standard 重叠 2、high 重叠 4。"
+             "快适合 CPU、高更干净。与 --num-overlap 不能同时使用",
+    )
+    p_sep.add_argument(
+        "--num-overlap", type=int, default=None,
+        help="显式重叠窗口数。与 --quality 都不传时用模型配置"
+             "（ep317 为 2，karaoke 配置为 4）；二者不能同时使用",
+    )
     p_sep.add_argument("--tta", action="store_true",
                        help="测试时增强（极性/声道反转平均，三倍耗时，默认关）")
     p_sep.set_defaults(func=_cmd_separate)
@@ -205,6 +225,10 @@ def main(argv=None) -> int:
         return 1
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        # 命令执行中的 Ctrl+C：不打裸 traceback，与 argparse 的 SystemExit(2) 分开
+        print("已取消")
+        return 130
     except Exception as e:
         # 命令层兜底：traceback 对非专业用户没有意义，落盘后给一句中文 +
         # 日志路径；成功路径的 stdout 与退出码完全不变（失败仍是退出码 1）

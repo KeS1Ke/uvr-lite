@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.1.7-8A2BE2)
+![version](https://img.shields.io/badge/version-0.1.9-8A2BE2)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D6)
@@ -33,9 +33,9 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 
 - **One-click install**: `install.bat` (Windows) / `install.sh` (Linux/macOS) — venv + dependencies + torch (CPU/CUDA auto-detection) + model download (SHA256 verified) + smoke test
 - **Primary model**: BS-RoFormer ep317 (trained by viperx, SDR ≈ 10.9–12.9 dB) — a full track (~3 min) takes about **51 s** on an RTX 4060
-- **Lossless output**: FLAC (16/24 bit) or WAV, original 44.1 kHz sample rate preserved
+- **Lossless output**: FLAC (16/24 bit) or WAV. Input is resampled to the model sample rate (both configs are 44100 Hz) and then written
 - **Stem mixing**: combine vocals + instrumental back into the full track (the inverse of separation); exact summation by default (recovers the original mix from same-source stems), adjustable vocal/instrumental gain, optional peak normalization; available in both the CLI and the desktop GUI
-- **No training code**: inference only, repo code < 1 MB
+- **No training code**: inference only; repository source is about 1 MB
 - Optional second model: `mel_band_karaoke` (Mel-Band RoFormer Karaoke, trained by aufr33 & viperx)
 
 ## Desktop GUI (Windows, recommended for non-technical users)
@@ -46,7 +46,7 @@ Separation of a **MiMo TTS singing voice + synth backing** mixture (log-frequenc
 The base package is **self-contained** — Python, CPU PyTorch and the fp16-slimmed model (320 MB, ~50% smaller than the original 639 MB, a size figure taken from upstream notes and not independently verified here) are all inside; no downloads during installation. The **CUDA engine** (NVIDIA GPU acceleration) is optional and downloaded on demand (semi-online, same approach as UVR official):
 
 1. **Double-click** the installer; pick an install location (default: your user folder) — everything lands in one folder, no scattering
-2. **Optional**: tick "下载 CUDA 推理引擎" (downloads ~3.3 GB, ~4.9 GB on disk) if you have an NVIDIA GPU — fetched during install with a progress page + SHA256 verification; skip it and add it later any time
+2. **Optional**: tick "下载 CUDA 推理引擎" (downloads ~3.3 GB, about 4.7 GB on disk) if you have an NVIDIA GPU — fetched during install with a progress page + SHA256 verification; skip it and add it later any time
 3. **Done** — a ♪ shortcut appears on your **desktop and Start menu**; double-click it to open the GUI
 4. Drag songs in (or pick a folder), choose the model, click **开始分离** (Start Separation) — live progress + ETA; completed files get a ✓, unreadable formats get a ✗ before processing starts
 
@@ -57,7 +57,7 @@ Tips:
 - **Minimize to tray** (optional, off by default): when checked, minimizing hides the window in the notification area instead of the taskbar. Closing the window still exits. The tray menu can show the window again or quit.
 - **No GPU installed yet?** The GUI's **推理引擎** panel has a **下载 CUDA 引擎** button (resumable, multi-mirror fallback) — or run `uvr-lite install-cuda` from the CLI; install it whenever you like, no reinstall needed
 - **Upgrade**: run the installer again — it overwrites in place and keeps your settings
-- **Uninstall**: Control Panel → Programs and Features → uvr-lite (also available as `Uninstall.exe` in the install folder); removes shortcuts, registry settings and the install folder
+- **Uninstall**: Control Panel → Programs and Features → uvr-lite, the Start menu item 「卸载 uvr-lite」, or `unins000.exe` in the install folder. Shortcuts, registry settings and the install folder are removed; `logs` in the install folder are kept
 - The GUI is in Chinese by design (target users: family & friends); the CLI below remains for power users
 
 ## Quick Start
@@ -84,6 +84,7 @@ The script: creates a virtual environment `.venv` → detects an NVIDIA GPU (CUD
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate.bat (PowerShell: .venv\Scripts\Activate.ps1)
 pip install -e ".[ui]"                               # [ui] = GUI extras (PySide6); drop it for a CLI-only setup
 uvr-lite download                                    # download the model (~320 MB)
+uvr-lite ui                                          # start the desktop GUI
 ```
 
 ## Usage
@@ -129,8 +130,9 @@ uvr-lite separate song.flac -m mel_band_karaoke
 # Low-VRAM GPUs: smaller batch size prevents OOM
 uvr-lite separate song.flac --batch-size 1
 
-# Speed/quality knob: 1 = no overlap (~2× faster), 2 = default, higher = smoother
-uvr-lite separate song.flac --num-overlap 1
+# Quality tier: fast / standard / high = overlap 1 / 2 / 4.
+# fast suits CPU; high is cleaner. Do not combine with --num-overlap.
+uvr-lite separate song.flac --quality fast
 
 # Stem mixing: combine vocals + instrumental back into the full track (exact summation by default)
 uvr-lite mix output/song-vocals.flac output/song-instrumental.flac -o mixed
@@ -154,8 +156,11 @@ uvr-lite install-cuda
 | `--device` | `auto` (default) / `cpu` / `cuda` / `mps` |
 | `--bigshifts N` | Number of circular time-shift passes; >1 improves quality at linear cost (default 1) |
 | `--batch-size N` | Inference batch size (default from model config); set `1` on low-VRAM GPUs |
-| `--num-overlap N` | Overlapping chunk count (speed/quality knob): `1` = no overlap (~2× faster); default from model config (2 for the primary model, 4 for karaoke) — pass a value to override |
+| `--quality` | `fast` / `standard` / `high` (overlap 1 / 2 / 4). fast suits CPU; high is cleaner. The default tier is standard (overlap 2). Mutually exclusive with `--num-overlap` |
+| `--num-overlap N` | Explicit overlap count. If neither this nor `--quality` is passed, the model config is used (2 for ep317; the karaoke config's own overlap is 4). Passing `--quality`, or a quality tier in the GUI, overrides that config |
 | `--tta` | Test-time augmentation (polarity/channel inversion averaging, 3× runtime, off by default) |
+
+`bs_roformer_ep317` is already this app's vocal model. `mel_band_karaoke` separates lead vocal from backing vocals; it is not a cleaner vocal/instrumental split. Larger overlap smooths chunk seams: fast (overlap 1) is the CPU choice, standard (overlap 2) is the default tier, and high (overlap 4) is cleaner at about twice the runtime of standard. The karaoke model's own overlap is 4, but a quality tier in the GUI (or `--quality`) overrides it explicitly.
 
 `mix` subcommand options:
 
@@ -175,14 +180,14 @@ Pairing is filename-based and case-insensitive: vocals `-vocals` / `_vocals`, in
 
 - **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
 - **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
-- **Disk space**: ~1.2 GB after installing the CPU package; +~4.9 GB if you add the CUDA engine
+- **Disk space**: ~1.2 GB after installing the CPU package; about +4.7 GB if you add the CUDA engine
 - **Model SHA256** is verified once and cached (`*.verified` marker) — subsequent runs skip the full-file hash
 - **CUDA engine ABI**: the bundled wheel is `cp312/win_amd64` only, so `install-cuda` (and the GUI's download button) requires **64-bit Windows + Python 3.12** — which is what the official installer ships. On any other interpreter the command stops with an explanatory error instead of downloading 3.3 GB that cannot import; the CPU engine is unaffected. For GPU acceleration elsewhere, install the CUDA build of torch from PyPI: `pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## How It Works
 
 ```
-input audio → soundfile+soxr decode (44.1 kHz, m4a via audioread) → (optional normalization)
+input audio → soundfile+soxr decode (m4a via audioread) → resample to the model sample rate (44100 Hz in both configs) → (optional normalization)
             → BigShifts circular time-shift averaging → BS-RoFormer forward (vocals mask)
             → instrumental = mix − vocals (mathematically lossless)
             → soundfile writes FLAC/WAV
@@ -212,7 +217,8 @@ uvr-lite/
 │   ├── errors.py      #   shared cancellation exception
 │   ├── models.py      #   model registry (URL + SHA256)
 │   ├── download.py    #   streaming download + integrity check + CUDA engine installer
-│   └── configs/       #   model config yaml files
+│   ├── configs/       #   model config yaml files
+│   └── ui/            #   desktop GUI (PySide6)
 ├── msst/              # vendored inference engine (ZFTurbo MSST subset, MIT)
 ├── install.bat|sh     # one-click installers
 └── scripts/           # optional extras: analyze (DSP) / compose (procedural) / render_spectro (spectrograms)
@@ -239,4 +245,4 @@ Per the MIT license: third-party projects using these models must credit UVR and
 
 ## License
 
-MIT License — see [LICENSE](LICENSE). The `msst/` subdirectory retains the original ZFTurbo MSST copyright notice.
+MIT License — see [LICENSE](LICENSE). `msst/` comes from ZFTurbo Music-Source-Separation-Training (MIT). Some files do not keep the upstream copyright header; attribution is in [msst/NOTICE.md](msst/NOTICE.md).

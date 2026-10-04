@@ -54,6 +54,8 @@ class SeparationWorker(QObject):
     progress = Signal(str, int, int, int, int, int)
     file_done = Signal(int, list)      # file_idx, 写出文件列表
     file_failed = Signal(int, str)     # file_idx, 错误信息
+    file_rejected = Signal(int)        # 预检未过的原始下标（格式不支持）
+    precheck_ready = Signal(object)    # 将要分离的原始下标列表；空则不加载模型
     all_finished = Signal(int, int, bool)  # 成功数, 失败数, 是否取消
 
     def __init__(self, files: list[Path], out_dir: str, params: SeparationParams):
@@ -63,63 +65,127 @@ class SeparationWorker(QObject):
         self.params = params
         self._cancel = False
         self._cur_idx = 0
+        self._job_total = 0
         self._tracker = ProgressTracker(params.bigshifts)
 
     def cancel(self) -> None:
         self._cancel = True
 
     def run(self) -> None:
-        # 惰性导入：首个分离任务才加载 torch（单测 patch 定义处 uvr_lite.engine.Separator）
-        from ..engine import CancelledError, Separator
-
+        # 任何出口恰好一次 all_finished。成功路径靠 emitted 挡住 finally 再发一次。
+        emitted = False
         ok = failed = 0
-        total = len(self.files)
+
+        def finish(ok_n: int, failed_n: int, cancelled: bool) -> None:
+            nonlocal emitted, ok, failed
+            ok, failed = ok_n, failed_n
+            if emitted:
+                return
+            emitted = True
+            self.all_finished.emit(ok_n, failed_n, cancelled)
+
         try:
-            sep = Separator(
-                model_name=self.params.model_name,
-                device=self.params.device,
-                batch_size=self.params.batch_size,
-                num_overlap=self.params.num_overlap,
-                verbose=False,
-            )
-        except Exception as e:
-            # 引擎加载失败（权重损坏/CUDA 不可用等）没有控制台可看 traceback，
-            # 先落盘再按原样上报给用户（信号语义不变）
-            log_exception(f"加载模型失败: {self.params.model_name}")
-            for idx in range(total):
-                self.file_failed.emit(idx, friendly_error(e))
-            self.all_finished.emit(0, total, False)
-            return
-        for idx, f in enumerate(self.files):
-            self._cur_idx = idx
-            # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从 50% 起算、
-            # infer 回调再把进度打回（进度条回跳）
-            self._tracker = ProgressTracker(self.params.bigshifts)
-            if self._cancel:
-                break
             try:
-                written = sep.separate(
-                    str(f), str(self.out_dir),
-                    pcm=self.params.pcm,
-                    fmt=self.params.fmt,
-                    bigshifts=self.params.bigshifts,
-                    tta=self.params.tta,
-                    progress_callback=self._on_progress,
-                )
-                ok += 1
-                self.file_done.emit(idx, written)
-            except CancelledError:
-                self._cancel = True
-                break
+                # 预检不该拉起 torch：引擎 import 放在确认有文件可分离之后
+                from .files import precheck_audio
             except Exception as e:
-                failed += 1
-                log_exception(f"分离失败（第 {idx + 1}/{total} 个）: {f}")
-                self.file_failed.emit(idx, friendly_error(e))
-        self.all_finished.emit(ok, failed, self._cancel)
+                log_exception("预检模块导入失败")
+                msg = friendly_error(e)
+                for idx in range(len(self.files)):
+                    self.file_failed.emit(idx, msg)
+                finish(0, len(self.files), False)
+                return
+
+            ok_idx: list[int] = []
+            for idx, f in enumerate(self.files):
+                if self._cancel:
+                    break
+                try:
+                    good = bool(precheck_audio(f))
+                except Exception:
+                    log_exception(f"预检失败: {f}")
+                    good = False
+                if good:
+                    ok_idx.append(idx)
+                else:
+                    self.file_rejected.emit(idx)
+            if self._cancel:
+                finish(0, 0, True)
+                return
+            if not ok_idx:
+                self.precheck_ready.emit([])
+                finish(0, len(self.files), False)
+                return
+            self.precheck_ready.emit(list(ok_idx))
+
+            try:
+                # 惰性导入：有文件要分离才加载 torch（单测 patch uvr_lite.engine.Separator）
+                from ..engine import CancelledError, Separator
+            except Exception as e:
+                log_exception(f"加载引擎失败: {self.params.model_name}")
+                msg = friendly_error(e)
+                for compact in range(len(ok_idx)):
+                    self.file_failed.emit(compact, msg)
+                finish(0, len(ok_idx), False)
+                return
+
+            total = len(ok_idx)
+            self._job_total = total
+            try:
+                sep = Separator(
+                    model_name=self.params.model_name,
+                    device=self.params.device,
+                    batch_size=self.params.batch_size,
+                    num_overlap=self.params.num_overlap,
+                    verbose=False,
+                )
+            except Exception as e:
+                # 引擎加载失败（权重损坏/CUDA 不可用等）没有控制台可看 traceback，
+                # 先落盘再按原样上报给用户（信号语义不变）
+                log_exception(f"加载模型失败: {self.params.model_name}")
+                msg = friendly_error(e)
+                for compact in range(total):
+                    self.file_failed.emit(compact, msg)
+                finish(0, total, False)
+                return
+            for compact, src_idx in enumerate(ok_idx):
+                self._cur_idx = compact
+                f = self.files[src_idx]
+                # 每文件重置 tracker：_pass_done 残留会导致下一文件 chunk 从 50% 起算、
+                # infer 回调再把进度打回（进度条回跳）
+                self._tracker = ProgressTracker(self.params.bigshifts)
+                if self._cancel:
+                    break
+                try:
+                    written = sep.separate(
+                        str(f), str(self.out_dir),
+                        pcm=self.params.pcm,
+                        fmt=self.params.fmt,
+                        bigshifts=self.params.bigshifts,
+                        tta=self.params.tta,
+                        progress_callback=self._on_progress,
+                    )
+                    ok += 1
+                    self.file_done.emit(compact, written)
+                except CancelledError:
+                    self._cancel = True
+                    break
+                except Exception as e:
+                    failed += 1
+                    log_exception(f"分离失败（第 {compact + 1}/{total} 个）: {f}")
+                    self.file_failed.emit(compact, friendly_error(e))
+            finish(ok, failed, self._cancel)
+        except Exception:
+            log_exception("分离任务异常退出")
+            finish(ok, failed, self._cancel)
+        finally:
+            if not emitted:
+                self.all_finished.emit(ok, failed, self._cancel)
 
     def _on_progress(self, phase: str, done: int, total: int) -> bool:
         pct = round(self._tracker.on_progress(phase, done, total) * 100)
-        self.progress.emit(phase, done, total, self._cur_idx, len(self.files), pct)
+        file_total = self._job_total or len(self.files)
+        self.progress.emit(phase, done, total, self._cur_idx, file_total, pct)
         return not self._cancel
 
 
@@ -145,38 +211,64 @@ class CombineWorker(QObject):
         self._cancel = True
 
     def run(self) -> None:
-        # 惰性导入：mix 不 import torch，合成任务比分离任务更早可用
-        from ..errors import CancelledError
-        from ..mix import combine
-
+        emitted = False
         ok = failed = 0
-        total = len(self.pairs)
-        for idx, (vocals, instrumental) in enumerate(self.pairs):
-            self._cur_idx = idx
-            self._tracker = ProgressTracker()  # 每对重置，进度不回跳
-            if self._cancel:
-                break
+
+        def finish(ok_n: int, failed_n: int, cancelled: bool) -> None:
+            nonlocal emitted, ok, failed
+            ok, failed = ok_n, failed_n
+            if emitted:
+                return
+            emitted = True
+            self.all_finished.emit(ok_n, failed_n, cancelled)
+
+        try:
             try:
-                written = combine(
-                    str(vocals), str(instrumental), str(self.out_dir),
-                    vocal_gain=self.params.vocal_gain,
-                    inst_gain=self.params.inst_gain,
-                    pcm=self.params.pcm,
-                    fmt=self.params.fmt,
-                    normalize=self.params.normalize,
-                    verbose=False,
-                    progress_callback=self._on_progress,
-                )
-                ok += 1
-                self.file_done.emit(idx, [str(written)])
-            except CancelledError:
-                self._cancel = True
-                break
+                # 惰性导入：mix 不 import torch，合成任务比分离任务更早可用
+                from ..errors import CancelledError
+                from ..mix import combine
             except Exception as e:
-                failed += 1
-                log_exception(f"合成失败（第 {idx + 1}/{total} 对）: {vocals}")
-                self.file_failed.emit(idx, friendly_error(e))
-        self.all_finished.emit(ok, failed, self._cancel)
+                log_exception("合成模块导入失败")
+                msg = friendly_error(e)
+                total = len(self.pairs)
+                for idx in range(total):
+                    self.file_failed.emit(idx, msg)
+                finish(0, total, False)
+                return
+
+            total = len(self.pairs)
+            for idx, (vocals, instrumental) in enumerate(self.pairs):
+                self._cur_idx = idx
+                self._tracker = ProgressTracker()  # 每对重置，进度不回跳
+                if self._cancel:
+                    break
+                try:
+                    written = combine(
+                        str(vocals), str(instrumental), str(self.out_dir),
+                        vocal_gain=self.params.vocal_gain,
+                        inst_gain=self.params.inst_gain,
+                        pcm=self.params.pcm,
+                        fmt=self.params.fmt,
+                        normalize=self.params.normalize,
+                        verbose=False,
+                        progress_callback=self._on_progress,
+                    )
+                    ok += 1
+                    self.file_done.emit(idx, [str(written)])
+                except CancelledError:
+                    self._cancel = True
+                    break
+                except Exception as e:
+                    failed += 1
+                    log_exception(f"合成失败（第 {idx + 1}/{total} 对）: {vocals}")
+                    self.file_failed.emit(idx, friendly_error(e))
+            finish(ok, failed, self._cancel)
+        except Exception:
+            log_exception("合成任务异常退出")
+            finish(ok, failed, self._cancel)
+        finally:
+            if not emitted:
+                self.all_finished.emit(ok, failed, self._cancel)
 
     def _on_progress(self, phase: str, done: int, total: int) -> bool:
         pct = round(self._tracker.on_progress(phase, done, total) * 100)
@@ -258,10 +350,24 @@ class CudaTorchWorker(_DownloadWorker):
 
 
 def friendly_error(e: Exception) -> str:
-    """把异常转成非专业用户可读的中文信息。"""
-    from audioread.exceptions import NoBackendError
+    """把异常转成非专业用户可读的中文信息。
 
-    if isinstance(e, NoBackendError):
-        return "音频解码失败：文件可能损坏或格式不受支持"
-    msg = str(e).strip()
-    return f"{type(e).__name__}: {msg}" if msg else f"{type(e).__name__}"
+    audioread 导入失败必须留在这里，不能冒出 worker.run()。
+    """
+    no_backend: type | tuple = ()
+    try:
+        from audioread.exceptions import NoBackendError
+        no_backend = NoBackendError
+    except Exception:
+        no_backend = ()
+    try:
+        if no_backend and isinstance(e, no_backend):
+            return "音频解码失败：文件可能损坏或格式不受支持"
+    except Exception:
+        pass
+    try:
+        msg = str(e).strip()
+    except Exception:
+        msg = ""
+    name = type(e).__name__
+    return f"{name}: {msg}" if msg else name
