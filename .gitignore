@@ -26,6 +26,8 @@ build/
 dist/
 .pytest_cache/
 .ruff_cache/
+# 单元测试已移出仓库，不再入库
+/tests/
 
 # 音频产物
 output*/
