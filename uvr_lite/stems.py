@@ -5,6 +5,7 @@ CLI 批量合成（uvr-lite mix --batch）与 UI「合成」页共用；纯 path
 `{stem}-instrumental`，另兼容 `-inst` 缩写（第三方工具常见）。
 """
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,12 @@ def split_stem(path: Path) -> tuple[str, str] | None:
     `song-instrumental.wav` 扩展名不同也能配对。
     """
     name = Path(path).stem
+    # 旧版把编号放在 kind 后，新版放在 kind 前；统一配对基名为 song-2。
+    legacy = re.search(r"-([2-9]|[1-9][0-9]+)$", name)
+    number = ""
+    if legacy is not None:
+        number = legacy.group(0)
+        name = name[:legacy.start()]
     low = name.lower()
     for kind, suffixes in (
         ("instrumental", INSTRUMENTAL_SUFFIXES),
@@ -50,8 +57,25 @@ def split_stem(path: Path) -> tuple[str, str] | None:
     ):
         for suf in suffixes:
             if low.endswith(suf) and len(low) > len(suf):
-                return name[: len(name) - len(suf)], kind
+                return name[: len(name) - len(suf)] + number, kind
     return None
+
+
+def separation_output_paths(out_dir: Path, stem: str,
+                            outputs: list[tuple[str, str]]) -> list[Path]:
+    """整对选择共同基名，任一格式/旧版编号的残留都占用该次分离编号。"""
+    occupied = set()
+    for path in out_dir.iterdir():
+        split = split_stem(path)
+        if split is not None:
+            occupied.add(split[0].lower())
+    index = 1
+    while True:
+        base = stem if index == 1 else f"{stem}-{index}"
+        paths = [out_dir / f"{base}-{kind}.{codec}" for kind, codec in outputs]
+        if base.lower() not in occupied and not any(path.exists() for path in paths):
+            return paths
+        index += 1
 
 
 def pair_stems(paths: Iterable[Path]) -> PairResult:

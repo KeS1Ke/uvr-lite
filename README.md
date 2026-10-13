@@ -176,12 +176,18 @@ uvr-lite install-cuda
 
 Pairing is filename-based and case-insensitive: vocals `-vocals` / `_vocals`, instrumental `-instrumental` / `_instrumental` / `-inst` / `_inst`; extensions may differ.
 
+Repeated separation keeps both stems under the same numbered base, such as
+`song-2-vocals.flac` and `song-2-instrumental.flac`. Legacy names such as
+`song-vocals-2.flac` also pair automatically. Separation and mixing use 32-bit
+float WAV when the output peak exceeds 0 dBFS, including when FLAC was requested,
+to preserve samples that integer PCM cannot represent.
+
 **Notes**
 
 - **mp3 input** requires libsndfile ≥ 1.1 (bundled on Windows; on Linux install `libsndfile1` or upgrade the `soundfile` package)
 - **CPU inference** runs at roughly 6× real-time (a 3-min track ≈ 17 min) — a GPU is recommended
 - **Disk space**: ~1.2 GB after installing the CPU package; about +4.7 GB if you add the CUDA engine
-- **Model SHA256** is verified once and cached (`*.verified` marker) — subsequent runs skip the full-file hash
+- **Model SHA256** is cached (`*.verified` marker) while the expected hash, file size and modification time remain unchanged; changed files are hashed again
 - **CUDA engine ABI**: the bundled wheel is `cp312/win_amd64` only, so `install-cuda` (and the GUI's download button) requires **64-bit Windows + Python 3.12** — which is what the official installer ships. On any other interpreter the command stops with an explanatory error instead of downloading 3.3 GB that cannot import; the CPU engine is unaffected. For GPU acceleration elsewhere, install the CUDA build of torch from PyPI: `pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## How It Works

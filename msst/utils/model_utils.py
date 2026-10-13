@@ -121,19 +121,26 @@ def demix(
     if mode == 'demucs':
         chunk_size = config.training.samplerate * config.training.segment
         num_instruments = len(config.training.instruments)
-        num_overlap = config.inference.num_overlap
-        step = chunk_size // num_overlap
     else:
         if 'chunk_size' in config.inference:
             chunk_size = config.inference.chunk_size
         else:
             chunk_size = config.audio.chunk_size
         num_instruments = len(prefer_target_instrument(config))
-        num_overlap = config.inference.num_overlap
 
+    num_overlap = config.inference.num_overlap
+    if not 1 <= num_overlap <= chunk_size:
+        raise ValueError(
+            f"num_overlap must be between 1 and chunk_size ({chunk_size}), got {num_overlap}"
+        )
+    batch_size = config.inference.batch_size
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    step = chunk_size // num_overlap
+
+    if mode == 'generic':
         # Fade only inside the overlap. num_overlap=1 has none, so the window
         # stays all ones; a zero endpoint would become a zero sample.
-        step = chunk_size // num_overlap
         overlap_samples = chunk_size - step
         fade_size = 0 if overlap_samples <= 0 else min(chunk_size // 10, overlap_samples)
         border = overlap_samples
@@ -142,8 +149,6 @@ def demix(
         # Add padding for generic mode to handle edge artifacts
         if length_init > 2 * border and border > 0:
             mix = nn.functional.pad(mix, (border, border), mode="reflect")
-
-    batch_size = config.inference.batch_size
 
     use_amp = getattr(config.training, 'use_amp', True)
 
@@ -183,17 +188,17 @@ def demix(
                     arr = torch.stack(batch_data, dim=0)
                     x = model(arr)
 
-                    if mode == "generic":
-                        window = windowing_array.clone() # using clone() fixes the clicks at chunk edges when using batch_size=1
-                        # fade_size==0: skip. window[-0:] would be the whole window.
-                        if fade_size > 0:
-                            if i - step == 0:  # First audio chunk, no fadein
-                                window[:fade_size] = 1
-                            elif i >= mix.shape[1]:  # Last audio chunk, no fadeout
-                                window[-fade_size:] = 1
-
                     for j, (start, seg_len) in enumerate(batch_locations):
                         if mode == "generic":
+                            # Each chunk needs its own boundary window, independent
+                            # of how many chunks happen to share this batch.
+                            window = windowing_array.clone()
+                            # fade_size==0: window[-0:] would be the whole window.
+                            if fade_size > 0:
+                                if start == 0:  # First audio chunk, no fadein
+                                    window[:fade_size] = 1
+                                if start + step >= mix.shape[1]:  # Last chunk, no fadeout
+                                    window[-fade_size:] = 1
                             result[..., start:start + seg_len] += x[j, ..., :seg_len].cpu() * window[..., :seg_len]
                             counter[..., start:start + seg_len] += window[..., :seg_len]
                         else:

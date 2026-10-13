@@ -11,23 +11,24 @@
 # 一致：漂移会让进度条停在该阶段起点，tests/test_ui_files.py 有按键遍历的行为守卫。
 PHASE_CN = {
     "decode": "解码", "infer": "推理", "chunk": "推理",
-    "tta": "增强", "mix": "合成", "write": "写出",
+    "tta": "增强", "tta_chunk": "增强", "mix": "合成", "write": "写出",
 }
 
 
 class ProgressTracker:
-    """把引擎的阶段回调（decode/infer/chunk/tta/mix/write）映射为文件内进度。
+    """把引擎的阶段回调映射为文件内进度。
 
     分离权重：decode 5% → chunk/infer 45%（bigshifts 多 pass 均分，chunk
     为当前 pass 内部子进度）→ tta 40% → write 10%。
     合成权重：decode 5%（两文件各半步）→ mix 55%→90%（占 35%）→ write 10%；
-    分离路径不会收到 mix 回调，合成路径不会收到 infer/chunk/tta，共用一张表
+    分离路径不会收到 mix 回调，合成路径不会收到 infer/chunk/tta/tta_chunk，共用一张表
     不互相干扰。
     """
 
     def __init__(self, bigshifts: int = 1):
         self.bigshifts = max(1, bigshifts)
         self._pass_done = 0
+        self._tta_pass_done = 0
 
     def on_progress(self, phase: str, done: int, total: int) -> float:
         # 分支里的阶段名即 PHASE_CN 的键（不引用常量，保持本模块纯逻辑、不因词表变动而变行为）
@@ -39,7 +40,17 @@ class ProgressTracker:
         if phase == "infer":
             self._pass_done = done
             return 0.05 + (done / self.bigshifts) * 0.45
+        if phase == "tta_chunk":
+            # 两次增强各做 bigshifts 个 pass；每个 pass 的最后一条 chunk 为 done==total。
+            # 普通 chunk 与增强 chunk 分开，增强期间不再回到初始推理的 5–50% 区间。
+            frac = done / total if total else 0
+            pct = 0.50 + 0.40 * (self._tta_pass_done + frac) / (2 * self.bigshifts)
+            if total and done >= total:
+                self._tta_pass_done += 1
+            return pct
         if phase == "tta":
+            if total:
+                self._tta_pass_done = round(done / total * 2 * self.bigshifts)
             return 0.50 + 0.40 * (done / total if total else 0)
         if phase == "mix":
             return 0.55 + 0.35 * (done / total if total else 0)

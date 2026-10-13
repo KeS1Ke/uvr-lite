@@ -284,7 +284,8 @@ class _DownloadWorker(QObject):
     finished(False, _cancelled_text)。
     """
 
-    progress = Signal(int, int)   # done_bytes, total_bytes
+    # CUDA wheel 和下载＋解压累计值超过 2 GiB；Qt int 只有 32 位，保留 Python 整数。
+    progress = Signal(object, object)   # done_bytes, total_bytes
     finished = Signal(bool, str)  # 是否成功, 错误/取消信息
 
     _cancelled_text = "已取消（断点续传，可随时重新下载）"
