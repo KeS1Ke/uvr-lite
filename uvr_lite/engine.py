@@ -41,6 +41,8 @@ from .audio_io import load_audio  # noqa: E402
 from .download import config_path, ensure_model  # noqa: E402
 from .errors import CancelledError  # noqa: E402  re-export（旧调用方兼容）
 from .models import DEFAULT_MODEL, get_model_info  # noqa: E402
+from .output_policy import output_format as _output_format  # noqa: E402
+from .stems import separation_output_paths  # noqa: E402
 
 
 def pick_device(device: str) -> str:
@@ -60,6 +62,8 @@ def load_model(model_name: str, ckpt_path: Path, device: str,
     batch_size 为 None 表示调用方未指定。仅 CPU 会在此时把推理 batch 改为 1；
     显式传入的值各设备都保留。
     """
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size 必须为正整数")
     info = get_model_info(model_name)
     torch.backends.cudnn.benchmark = True
 
@@ -130,36 +134,6 @@ def _load_audio(path: Path, sr: int) -> np.ndarray:
     return load_audio(path, sr)[0]
 
 
-def _separate_output_path(out_dir: Path, stem: str, kind: str, codec: str) -> Path:
-    """空闲时 `{stem}-{kind}.{codec}`；已占用则 `{stem}-{kind}-2`、`-3`……直到空位。
-
-    用 Path.exists()：Windows 上大小写不同的同名文件也视为占用。
-    """
-    candidate = out_dir / f"{stem}-{kind}.{codec}"
-    n = 2
-    while candidate.exists():
-        candidate = out_dir / f"{stem}-{kind}-{n}.{codec}"
-        n += 1
-    return candidate
-
-
-def _output_format(fmt: str, pcm: str, peak: float) -> tuple[str, str, str | None]:
-    """返回 (codec, subtype, 警告或 None)。峰值 >1 时改为 32-bit float WAV。"""
-    if peak > 1.0:
-        if fmt == "flac":
-            warn = (
-                f"峰值 {peak:.3f} 超过 0 dBFS，FLAC 无法保存超过 0 dBFS 的采样，"
-                "整数 PCM 会削波，本次改为 32-bit float WAV"
-            )
-        else:
-            warn = (
-                f"峰值 {peak:.3f} 超过 0 dBFS，整数 PCM 会削波，本次改为 32-bit float WAV"
-            )
-        return "wav", "FLOAT", warn
-    codec = "flac" if (fmt == "flac" or (fmt == "auto" and peak <= 1.0)) else "wav"
-    return codec, pcm, None
-
-
 class Separator:
     """引擎会话：模型只加载一次，可连续分离多个文件。
 
@@ -170,6 +144,9 @@ class Separator:
     def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "auto",
                  batch_size: int | None = None, num_overlap: int | None = None,
                  verbose: bool = True):
+        for name, value in (("batch_size", batch_size), ("num_overlap", num_overlap)):
+            if value is not None and value < 1:
+                raise ValueError(f"{name} 必须为正整数")
         self.model_name = model_name
         self.device = pick_device(device)
         self.verbose = verbose
@@ -198,9 +175,9 @@ class Separator:
     ) -> list[Path]:
         """分离单个音频文件，输出 {stem}-vocals 与 {stem}-instrumental 两个文件。
 
-        目标名已存在时改为 {stem}-{kind}-2、{stem}-{kind}-3……不覆盖旧文件。
+        同一对输出使用共同基名；已有任一侧时改为 {stem}-2-{kind}、-3……。
         progress_callback(phase, done, total) -> bool：
-          phase 为 "decode" / "infer" / "chunk" / "tta" / "write"；
+          phase 为 "decode" / "infer" / "chunk" / "tta" / "tta_chunk" / "write"；
           返回 False 表示请求取消，引擎抛 CancelledError 并只删除本次写出的成品。
           不传（CLI 路径）时行为与旧版完全一致。
         """
@@ -243,7 +220,7 @@ class Separator:
                 self.config, self.model, mix, waveforms, self.device,
                 model_type, bigshifts=bigshifts, pbar=self.verbose,
                 progress_cb=lambda done, total: _cb("tta", done, total),
-                demix_progress_cb=lambda done, total: _cb("chunk", done, total),
+                demix_progress_cb=lambda done, total: _cb("tta_chunk", done, total),
             )
 
         # instrumental = 原混合 - 目标声部（数学无损）。两输入须同域：
@@ -255,21 +232,24 @@ class Separator:
             waveforms[target_key] = denormalize_audio(waveforms[target_key], norm_params)
         waveforms["instrumental"] = mix_orig - waveforms[target_key]
 
+        outputs = []
+        for instr_key, stem_name in [(target_key, target), ("instrumental", "instrumental")]:
+            est = waveforms[instr_key]
+            peak = float(np.abs(est).max())
+            codec, subtype, warn = _output_format(fmt, pcm, peak)
+            outputs.append((est, peak, codec, subtype, warn, stem_name))
+        paths = separation_output_paths(
+            out_dir, input_path.stem, [(output[5], output[2]) for output in outputs],
+        )
+
         written: list[Path] = []
         part_path: Path | None = None
         try:
-            for idx, (instr_key, stem_name) in enumerate(
-                [(target_key, target), ("instrumental", "instrumental")], start=1
-            ):
-                est = waveforms[instr_key]
-                peak = float(np.abs(est).max())
-                codec, subtype, warn = _output_format(fmt, pcm, peak)
+            for idx, (output, out_path) in enumerate(zip(outputs, paths, strict=True), start=1):
+                est, peak, codec, subtype, warn, _ = output
                 if warn is not None and self.verbose:
                     print(f"  警告: {warn}")
 
-                out_path = _separate_output_path(
-                    out_dir, input_path.stem, stem_name, codec,
-                )
                 # 先写同目录 .part，成功后再换名为成品，避免半截文件顶着最终名。
                 part_path = out_path.with_name(out_path.name + ".part")
                 sf.write(

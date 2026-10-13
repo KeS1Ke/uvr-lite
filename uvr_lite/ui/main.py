@@ -692,6 +692,9 @@ class MainWindow(QMainWindow):
     # ---------- 拖拽 ----------
 
     def dragEnterEvent(self, event) -> None:
+        if self._busy:
+            event.ignore()
+            return
         if event.mimeData().hasUrls():
             self._set_drop_target(True)
             event.acceptProposedAction()
@@ -711,6 +714,9 @@ class MainWindow(QMainWindow):
         isLocalFile() 过滤掉。
         """
         self._set_drop_target(False)
+        if self._busy:
+            event.ignore()
+            return
         if self.stack.currentWidget() is self.mix_page:
             self._drop_to_mix(event)
             return
@@ -1091,9 +1097,11 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
         device = self.combo_device.currentText()
-        # 与 _refresh_engine_status 同一判断：没装 torch_cuda 就不能选 cuda。
-        # auto/cpu 不拦截。预检在 worker 里做，这里还没起线程。
-        if device == "cuda" and not cuda_torch_installed():
+        # 安装包只含 CPU torch 时先提示下载；源码安装由引擎验证环境里的 torch，
+        # 不能以不存在的 bundle 目录拒绝用户通过 PyPI 安装的 CUDA 版。
+        # 主线程仍不 import torch。auto/cpu 不拦截。
+        bundled_cpu = (repo_root() / "torch_cpu").is_dir()
+        if device == "cuda" and bundled_cpu and not cuda_torch_installed():
             self.label_status.setText(
                 "未安装 CUDA 引擎，无法使用 CUDA 设备。"
                 "请先下载 CUDA 引擎，或改用「自动」/「CPU」。"
@@ -1367,6 +1375,7 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
+        self.setAcceptDrops(not busy)
         for w in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear,
                   self.combo_model, self.combo_device, self.combo_format, self.combo_pcm,
                   self.spin_bigshifts, self.spin_batch, self.combo_quality, self.check_tta,

@@ -106,33 +106,32 @@ def retired_model_files(name: str) -> list[Path]:
 
 # ---------- 校验缓存 ----------
 # 权重文件数百 MB，每轮运行全量 SHA256 约 1s+。标记内容是
-# `{期望 sha256}:{文件大小}`：sha 等于本次注册表期望且大小等于当前文件才跳过哈希。
-# 旧的 `{size}:{mtime_ns}` 对不上这个格式，一律视为未命中，重新哈希后改写。
+# `{期望 sha256}:{文件大小}:{mtime_ns}`：文件未变且期望未变才跳过哈希。
+# 旧标记视为未命中，重新哈希后改写。
 
 def _verified_marker(ckpt: Path) -> Path:
     return ckpt.with_name(ckpt.name + ".verified")
 
 
 def _check_verified(ckpt: Path, expected_sha: str) -> bool:
-    """标记里的 sha 等于本次期望、且大小等于当前文件 → 视为已验证。
-
-    只认 `{sha256}:{size}`。旧的 `{size}:{mtime_ns}`（不绑 sha）一律未命中。
-    """
+    """预期 SHA、大小与修改时间均未变时复用校验结果。"""
     marker = _verified_marker(ckpt)
     try:
         recorded = marker.read_text(encoding="utf-8").strip()
-        sha, sep, size_s = recorded.partition(":")
-        if not sep or not sha or not size_s:
-            return False
-        return sha == expected_sha and int(size_s) == ckpt.stat().st_size
+        sha, size_s, mtime_s = recorded.split(":")
+        stat = ckpt.stat()
+        return (sha == expected_sha and int(size_s) == stat.st_size
+                and int(mtime_s) == stat.st_mtime_ns)
     except (OSError, ValueError):
         return False
 
 
 def _mark_verified(ckpt: Path, expected_sha: str) -> None:
     try:
-        size = ckpt.stat().st_size
-        _verified_marker(ckpt).write_text(f"{expected_sha}:{size}", encoding="utf-8")
+        stat = ckpt.stat()
+        _verified_marker(ckpt).write_text(
+            f"{expected_sha}:{stat.st_size}:{stat.st_mtime_ns}", encoding="utf-8",
+        )
     except OSError:
         pass
 
@@ -157,13 +156,38 @@ def _download_single(url: str, tmp: Path,
     try:
         resp = urllib.request.urlopen(req)
     except urllib.error.HTTPError as e:
-        if e.code == 416 and existing:  # Range 超出文件末尾：文件已完整
-            return
+        if e.code == 416 and existing:
+            match = re.fullmatch(r"bytes \*/(\d+)", e.headers.get("Content-Range", ""))
+            e.close()
+            if match is not None and existing == int(match.group(1)):
+                return  # 仅当本地长度等于服务端总长时认为下载已完成
+            tmp.unlink()  # 旧的超长或无法确认的断点不能作为完整下载
+            return _download_single(url, tmp, progress_callback)
+        e.close()
         raise
 
     resume = existing > 0 and resp.status == 206
-    remaining = int(resp.headers.get("Content-Length", 0))
-    total = existing + remaining if resume else remaining
+    content_length = resp.headers.get("Content-Length")
+    try:
+        remaining = int(content_length or 0)
+    except ValueError:
+        resp.close()
+        raise
+    if remaining < 0:
+        resp.close()
+        raise RuntimeError("单连接响应的 Content-Length 不能为负数")
+    if resp.status == 206:
+        cr = _content_range(resp.headers.get("Content-Range", ""))
+        if cr is None or cr[0] != existing or cr[1] != cr[2] - 1:
+            resp.close()
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError("单连接续传的 Content-Range 不匹配")
+        if content_length is not None and remaining != cr[1] - cr[0] + 1:
+            resp.close()
+            raise RuntimeError("单连接续传的 Content-Length 与 Content-Range 不匹配")
+        total = cr[2]
+    else:
+        total = remaining
 
     mode = "ab" if resume else "wb"
     # 进度起点：续传从 existing 起；服务器忽略 Range 重下时文件被截断，从 0 起
@@ -181,7 +205,10 @@ def _download_single(url: str, tmp: Path,
                 # f.tell() 即已落盘字节（续传含 existing），不存在双计
                 if progress_callback is not None and not progress_callback(f.tell(), total):
                     raise InterruptedError("下载已取消")
+            if (resp.status == 206 or content_length is not None) and f.tell() != total:
+                raise EOFError(f"单连接下载长度不匹配，预期 {total} 字节，实际 {f.tell()}")
     finally:
+        resp.close()
         if bar is not None:
             bar.close()
 
@@ -189,6 +216,18 @@ def _download_single(url: str, tmp: Path,
 PARALLEL_SEGMENTS = 8        # 分段下载并发连接数
 PARALLEL_MIN_SIZE = 64 << 20  # 64MB 以上才分段（小文件单连接足够）
 _REPORT_INTERVAL = 4 << 20    # 进度回调限频：每 4MB 上报一次
+
+
+class _RangeResponseError(RuntimeError):
+    """分段响应不符合请求；取消其它分段后回退单连接。"""
+
+
+def _content_range(value: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", value.strip())
+    if match is None:
+        return None
+    start, end, total = map(int, match.groups())
+    return (start, end, total) if 0 <= start <= end < total else None
 
 
 def _probe_range(url: str) -> tuple:
@@ -202,9 +241,10 @@ def _probe_range(url: str) -> tuple:
     resp = urllib.request.urlopen(req)
     try:
         if resp.status == 206:
-            cr = resp.headers.get("Content-Range", "")  # bytes 0-0/<total>
-            total = int(cr.rsplit("/", 1)[1]) if "/" in cr else 0
-            return total, True
+            cr = _content_range(resp.headers.get("Content-Range", ""))
+            if cr is not None and cr[:2] == (0, 0):
+                return cr[2], True
+            return 0, False
         total = int(resp.headers.get("Content-Length", 0))
         return total, False
     finally:
@@ -214,7 +254,8 @@ def _probe_range(url: str) -> tuple:
 def _download_segment(url: str, part: Path, start: int, end: int,
                       retries: int,
                       cancel_check: Callable[[], bool] | None = None,
-                      on_chunk: Callable[[int], None] | None = None) -> None:
+                      on_chunk: Callable[[int], None] | None = None,
+                      expected_total: int | None = None) -> None:
     """下载 [start, end] 段到 part 文件；已下载部分（段文件大小）自动续传。
 
     失败重试 retries 次（Range 续传，成本低）；全部失败抛 RuntimeError。
@@ -222,32 +263,45 @@ def _download_segment(url: str, part: Path, start: int, end: int,
     on_chunk(n) 每写入 n 字节调用一次（进度增量上报）。
     """
     socket.setdefaulttimeout(60)
+    segment_size = end - start + 1
+    if part.exists() and part.stat().st_size > segment_size:
+        part.unlink()  # 旧下载器可能把忽略 Range 的整文件保存成分段
     for attempt in range(1 + retries):
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError("下载已取消")
         done = part.stat().st_size if part.exists() else 0
-        if start + done > end:
+        if done == segment_size:
             return
         headers = {"User-Agent": UA, "Range": f"bytes={start + done}-{end}"}
         try:
-            resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers))
-        except urllib.error.HTTPError as e:
-            if e.code == 416 and done > 0:
-                return
-            raise
-        # 服务器忽略 Range 时返回 200 全量：此时必须 "wb" 截断重写段文件，
-        # 否则追加模式会把整段内容接在已下载字节之后 → 合并出的权重损坏。
-        resume = done > 0 and resp.status == 206
-        try:
-            with open(part, "ab" if resume else "wb") as f:
-                while chunk := resp.read(1 << 20):
-                    if cancel_check is not None and cancel_check():
-                        raise InterruptedError("下载已取消")
-                    f.write(chunk)
-                    if on_chunk is not None:
-                        on_chunk(len(chunk))
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers)) as resp:
+                cr = _content_range(resp.headers.get("Content-Range", ""))
+                if (resp.status != 206 or cr is None or cr[:2] != (start + done, end)
+                        or (expected_total is not None and cr[2] != expected_total)):
+                    raise _RangeResponseError(f"段 {start}-{end} 的 Range 响应不匹配")
+                with open(part, "ab" if done else "wb") as f:
+                    remaining = segment_size - done
+                    while remaining:
+                        if cancel_check is not None and cancel_check():
+                            raise InterruptedError("下载已取消")
+                        chunk = resp.read(min(1 << 20, remaining))
+                        if not chunk:
+                            raise EOFError(f"段 {start}-{end} 提前结束，还缺 {remaining} 字节")
+                        f.write(chunk)
+                        remaining -= len(chunk)
+                        if on_chunk is not None:
+                            on_chunk(len(chunk))
+                    if resp.read(1):
+                        raise _RangeResponseError(f"段 {start}-{end} 超过预期长度")
             return
+        except _RangeResponseError:
+            part.unlink(missing_ok=True)  # 此处文件句柄已关闭，兼容 Windows
+            raise
         except InterruptedError:
             raise
         except Exception as e:
+            if isinstance(e, urllib.error.HTTPError):
+                e.close()
             if attempt >= retries:
                 raise RuntimeError(f"段 {start}-{end} 下载失败: {e}") from e
     raise RuntimeError(f"段 {start}-{end} 下载失败")
@@ -265,10 +319,17 @@ def _download_parallel(url: str, tmp: Path, total: int,
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    segments = min(segments, total)
     seg_size = (total + segments - 1) // segments
+    segments = (total + seg_size - 1) // seg_size
     parts = [tmp.with_name(f"{tmp.name}.s{i}") for i in range(segments)]
     lock = threading.Lock()
-    state = {"done": 0, "last_report": 0, "cancel": False}
+    abort = threading.Event()
+    for i, part in enumerate(parts):
+        expected_size = min(seg_size, total - i * seg_size)
+        if part.exists() and part.stat().st_size > expected_size:
+            part.unlink()
+    state = {"done": sum(p.stat().st_size for p in parts if p.exists()), "last_report": 0}
 
     def report(n: int) -> None:
         """增量累计已下载字节；限频上报进度，返回 False 置取消标志。"""
@@ -278,36 +339,43 @@ def _download_parallel(url: str, tmp: Path, total: int,
                     and state["done"] - state["last_report"] >= _REPORT_INTERVAL):
                 state["last_report"] = state["done"]
                 if not progress_callback(state["done"], total):
-                    state["cancel"] = True
-            # 全部完成后补一次最终回调（限频可能截断最后不足 4MB）
-            if progress_callback is not None and state["done"] >= total \
-                    and state["last_report"] < total:
-                state["last_report"] = total
-                progress_callback(total, total)
+                    abort.set()
 
     def work(i: int) -> None:
         start = i * seg_size
         end = min(start + seg_size - 1, total - 1)
         part = parts[i]
-        with lock:  # 段文件已有内容（续传）先计入进度
-            state["done"] += part.stat().st_size if part.exists() else 0
         _download_segment(url, part, start, end, retries,
-                          cancel_check=lambda: state["cancel"],
-                          on_chunk=report)
+                          cancel_check=abort.is_set,
+                          on_chunk=report, expected_total=total)
 
+    if progress_callback is not None and not progress_callback(state["done"], total):
+        raise InterruptedError("下载已取消")
     with ThreadPoolExecutor(max_workers=segments) as ex:
         futures = [ex.submit(work, i) for i in range(segments)]
-        for fut in as_completed(futures):
-            fut.result()  # 取消/段失败异常在此传播
+        try:
+            for fut in as_completed(futures):
+                fut.result()  # 取消/段失败异常在此传播
+        except BaseException:
+            abort.set()
+            for fut in futures:
+                fut.cancel()
+            raise
+
+    if abort.is_set():
+        raise InterruptedError("下载已取消")
+    if progress_callback is not None and not progress_callback(total, total):
+        raise InterruptedError("下载已取消")
 
     # 按序合并段文件 → tmp
     with open(tmp, "wb") as out:
-        for part in parts:
-            if part.exists():
-                with open(part, "rb") as p:
-                    while chunk := p.read(1 << 20):
-                        out.write(chunk)
-                part.unlink()
+        for i, part in enumerate(parts):
+            if part.stat().st_size != min(seg_size, total - i * seg_size):
+                raise RuntimeError(f"分段长度不匹配: {part.name}")
+            with open(part, "rb") as p:
+                shutil.copyfileobj(p, out, 1 << 20)
+    for part in parts:
+        part.unlink()
 
 
 def _download(urls: list[str], dest: Path,
@@ -327,10 +395,16 @@ def _download(urls: list[str], dest: Path,
             try:
                 total, supports_range = _probe_range(url)
                 if supports_range and total >= PARALLEL_MIN_SIZE:
-                    _download_parallel(url, tmp, total, progress_callback)
+                    try:
+                        _download_parallel(url, tmp, total, progress_callback)
+                    except _RangeResponseError:
+                        _download_single(url, tmp, progress_callback)
                 else:
                     _download_single(url, tmp, progress_callback)
                 tmp.replace(dest)
+                for part in dest.parent.glob(tmp.name + ".s*"):
+                    with contextlib.suppress(OSError):
+                        part.unlink(missing_ok=True)
                 return
             except InterruptedError:
                 raise
@@ -376,7 +450,7 @@ def ensure_model(name: str, force: bool = False,
                  progress_callback: Callable[[int, int], bool] | None = None) -> Path:
     """确保模型权重已下载且 SHA256 匹配；返回权重路径。
 
-    校验缓存：{ckpt}.verified 记 `{期望 sha256}:{size}`，两者都对上才跳过全量哈希。
+    校验缓存：{ckpt}.verified 记 `{期望 sha256}:{size}:{mtime_ns}`，均对上才跳过哈希。
     权重的本地文件名由注册表 filename 决定（.ckpt 或 .safetensors）。
     新权重就绪（标记命中 / 哈希通过 / 下载后校验通过）才回收注册表里声明的
     退役权重（retired_filenames，见 models.py）；未就绪时不动任何文件。

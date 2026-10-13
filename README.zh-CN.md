@@ -176,12 +176,16 @@ uvr-lite install-cuda
 
 配对按文件名后缀识别（大小写不敏感）：人声 `-vocals` / `_vocals`，伴奏 `-instrumental` / `_instrumental` / `-inst` / `_inst`；扩展名可不同。
 
+重复分离时，两条音轨共用编号，如 `歌曲-2-vocals.flac` 与 `歌曲-2-instrumental.flac`；
+旧版 `歌曲-vocals-2.flac` 也可自动配对。分离与合成的输出峰值超过 0 dBFS 时，
+统一改为 32 位浮点 WAV（即使指定 FLAC），保留整数 PCM 无法表示的采样值。
+
 **注意事项**
 
 - **mp3 输入**需 libsndfile ≥ 1.1（Windows 自带；Linux 装 `libsndfile1` 或升级 `soundfile` 包）
 - **CPU 推理**约 6 倍实时（3 分钟歌曲 ≈ 17 分钟）——建议使用 GPU
 - **磁盘占用**：CPU 包安装后约 1.2 GB；追加 CUDA 引擎后约 +4.7 GB
-- **模型校验缓存**：SHA256 校验一次后写入 `*.verified` 标记，后续运行跳过整文件哈希
+- **模型校验缓存**：SHA256 校验后写入 `*.verified` 标记；预期哈希、文件大小和修改时间均未变化时跳过整文件哈希，文件变化后重新校验
 - **CUDA 引擎的 Python 版本**：内置 wheel 只有 `cp312/win_amd64` 一款，因此 `install-cuda`（及界面里的下载按钮）要求 **64 位 Windows + Python 3.12**——官方安装包内置的正是这个版本。其他 Python 版本会在下载前就被拦下并给出说明，不会白下 3.3 GB 装不上；CPU 引擎不受影响。想在别的环境用显卡加速，从 PyPI 装 CUDA 版 torch 即可：`pip install torch --index-url https://download.pytorch.org/whl/cu128`
 
 ## 工作原理

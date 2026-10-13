@@ -116,8 +116,9 @@ function CudaEnginePresent: Boolean;
 begin
   // 完整引擎才跳过下载：完成标记，或旧安装里的 torch/version.py。
   // 只有 torch 目录（半成品常已有 __init__.py）不算已装。
-  Result := FileExists(ExpandConstant('{app}\torch_cuda\.complete'))
-    or FileExists(ExpandConstant('{app}\torch_cuda\torch\version.py'));
+  Result := FileExists(ExpandConstant('{app}\torch_cuda\torch\__init__.py'))
+    and (FileExists(ExpandConstant('{app}\torch_cuda\.complete'))
+      or FileExists(ExpandConstant('{app}\torch_cuda\torch\version.py')));
 end;
 
 function CudaTaskSelected: Boolean;

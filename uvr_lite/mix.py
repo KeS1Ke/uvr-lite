@@ -19,6 +19,7 @@ import soundfile as sf
 
 from .audio_io import load_audio, resample_audio
 from .errors import CancelledError
+from .output_policy import output_format
 from .stems import split_stem
 
 
@@ -148,14 +149,11 @@ def combine(
                 )
         mixed = mixed * gain
         peak = float(np.abs(mixed).max()) if mixed.size else 0.0
-    elif peak > 1.0 and verbose:
-        print(f"  警告: 峰值 {peak:.3f} 超过 0 dBFS，整数格式会削波"
-              "（可勾选/传入峰值归一化）")
     _cb("mix", 1, 1)
 
-    # 与分离引擎相同的 auto 规则：峰值 ≤ 1 落 FLAC，否则 WAV（PCM 会削波，
-    # 这里只对齐行为；要真正避免削波请用 normalize）
-    codec = "flac" if (fmt == "flac" or (fmt == "auto" and peak <= 1.0)) else "wav"
+    codec, subtype, warning = output_format(fmt, pcm, peak)
+    if warning is not None and verbose:
+        print(f"  警告: {warning}")
     out_path = _mix_output_path(out_dir, _output_stem(vocals, out_name), codec)
     # 扩展名是 .part 时 soundfile 无法从文件名判断格式，必须显式传入 format
     part_path = out_path.with_name(out_path.name + ".part")
@@ -163,7 +161,7 @@ def combine(
     written: list[Path] = []
     try:
         _cb("write", 0, 1)
-        sf.write(part_path, mixed.T, target_sr, subtype=pcm, format=codec.upper())
+        sf.write(part_path, mixed.T, target_sr, subtype=subtype, format=codec.upper())
         os.replace(part_path, out_path)
         written.append(out_path)
         if verbose:

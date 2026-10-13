@@ -29,13 +29,18 @@ source .venv/bin/activate
 
 # ---- 3. install torch (auto-detect GPU) ----
 echo "[3/5] Installing PyTorch (auto-detect GPU) ..."
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$(uname -s)" = "Darwin" ]; then
+    # macOS wheels include CPU/MPS support; the Linux CPU index has no macOS wheel.
+    echo "      - macOS detected, installing CPU/MPS build"
+    pip install --quiet "torch>=2.1"
+elif command -v nvidia-smi >/dev/null 2>&1; then
     echo "      - NVIDIA GPU detected, installing CUDA build (cu128)"
     pip install --quiet "torch>=2.1" --index-url https://download.pytorch.org/whl/cu128 \
-        || pip install --quiet "torch>=2.1"
+        || { echo "      [WARN] CUDA install failed, falling back to official CPU build" >&2
+             pip install --quiet "torch>=2.1" --index-url https://download.pytorch.org/whl/cpu; }
 else
     echo "      - No NVIDIA GPU detected, installing CPU build (slower separation)"
-    pip install --quiet "torch>=2.1"
+    pip install --quiet "torch>=2.1" --index-url https://download.pytorch.org/whl/cpu
 fi
 
 # ---- 4. install package + deps ----

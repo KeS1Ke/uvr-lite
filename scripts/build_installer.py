@@ -13,13 +13,14 @@
 
 打包机首次打包需下载约 1GB（绿色 Python 50MB + CPU torch 0.7GB + 模型
   320MB + PySide6-Essentials 等依赖），国内镜像优先；下载/安装产物跨次
-  构建复用（python/ torch_cpu/ models/ 存在即跳过，增量更新）。
+  构建复用（运行时规格匹配且冒烟通过才复用；模型独立校验）。
 
 前置: 本机安装 Inno Setup 7（默认探测 D:\\Inno setup / Program Files，可 --iscc 指定）
 """
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -97,6 +98,8 @@ DEPENDENCIES = [
 # 切换 CPU/CUDA）；rotary-embedding-torch 的依赖链会把 CPU torch（约 524MB）
 # 拖进 site-packages，故在 prepare_bundle 里单独 --no-deps 安装
 DEPS_INSTALLED_SEPARATELY = {"torch", "rotary-embedding-torch"}
+ROTARY_SPEC = "rotary-embedding-torch>=0.4"
+RUNTIME_READY = ".runtime-ready"
 
 
 # ---------- 工具 ----------
@@ -236,17 +239,13 @@ def _install_torch(bundle_dir: Path, indexes: list[str]) -> Path:
     import sympy 处失败。
 
     wheel 用自研多段下载器先下好（pip 大文件下载遇服务器断流会无限卡死，
-    见 a7f9dff），再 pip 安装本地 wheel；目录已存在视为已就绪（跨次复用）。
+    见 a7f9dff），再 pip 安装本地 wheel；缓存复用由运行时标记与冒烟统一判断。
     半在线单包制只有 CPU 一条路径：CUDA 引擎由安装器/应用按需下载（install.iss
     与 uvr_lite.download.install_cuda_torch）。签名里不留 tag 参数——曾有个
     「tag=cuda」死分支，且 SHA 校验被 `if tag == "cpu":` 包住，等于传错 tag 就
     静默跳过校验；现在没有可传错的 tag，校验也无条件执行。
     """
     dest = bundle_dir / "torch_cpu"
-    if (dest / "torch" / "__init__.py").exists():
-        _prune_torch(dest)  # 复用路径同样裁剪（幂等）
-        print("[4/5] torch_cpu 已就绪，复用")
-        return dest
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -319,6 +318,77 @@ def _smoke_ui(python_exe: Path) -> None:
     )
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     subprocess.run([str(python_exe), "-c", code], check=True, env=env)
+
+
+def _runtime_fingerprint() -> str:
+    """运行时准备规格；任何解释器、依赖或固定 torch 变化都使旧缓存失效。"""
+    specs = {
+        "schema": 1,
+        "python": [GREEN_PY_VERSION, GREEN_PY_TAG, GREEN_PY_FILENAME, GREEN_PY_SHA256],
+        "dependencies": [*DEPENDENCIES, ROTARY_SPEC],
+        "pyproject_sha256": sha256_of(ROOT / "pyproject.toml"),
+        "torch": [TORCH_VERSION, TORCH_CPU_SHA256],
+    }
+    return hashlib.sha256(json.dumps(specs, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _smoke_runtime(bundle_dir: Path) -> None:
+    """用内置解释器加载完整依赖/模型定义，并检查 CPU torch 与 Qt 事件循环。"""
+    python_exe = bundle_dir / "python" / "python.exe"
+    code = (
+        "import sys, importlib;"
+        "sys.path.insert(0, sys.argv[1]);"
+        "import uvr_lite.engine, uvr_lite.ui.main;"
+        "modules = ['audioread', 'rotary_embedding_torch', 'safetensors',"
+        "'models.bs_roformer.bs_roformer', 'models.bs_roformer.mel_band_roformer'];"
+        "[importlib.import_module(name) for name in modules];"
+        "import torch;"
+        "assert torch.__version__ == sys.argv[2], torch.__version__;"
+        "print('RUNTIME SMOKE OK')"
+    )
+    env = dict(os.environ, UVR_TORCH="cpu")
+    subprocess.run(
+        [str(python_exe), "-c", code, str(bundle_dir / "app"), f"{TORCH_VERSION}+cpu"],
+        check=True, env=env, cwd=bundle_dir / "app",
+    )
+    _smoke_ui(python_exe)
+
+
+def _prepare_runtime(bundle_dir: Path) -> None:
+    """完整安装并冒烟后才记为 ready；旧缓存或失败半成品必须重新准备。"""
+    fingerprint = _runtime_fingerprint()
+    marker = bundle_dir / RUNTIME_READY
+    try:
+        ready = marker.read_text(encoding="utf-8") == fingerprint
+    except (OSError, UnicodeError):
+        ready = False
+    if ready:
+        try:
+            _smoke_runtime(bundle_dir)
+        except (OSError, subprocess.CalledProcessError):
+            print("运行时缓存冒烟失败，重新安装…")
+        else:
+            print("[3/5] 运行时规格匹配且冒烟通过，复用")
+            return
+
+    # 先移除就绪标记，再清理旧目录。任一步失败都不会误认作可复用缓存。
+    marker.unlink(missing_ok=True)
+    for sub in ("python", "torch_cpu"):
+        dest = bundle_dir / sub
+        if dest.exists():
+            shutil.rmtree(dest)
+    _download_green_python(bundle_dir)
+    python_exe = bundle_dir / "python" / "python.exe"
+    print("[3/5] 安装应用依赖（soundfile/PySide6-Essentials 等）…")
+    _pip(python_exe, DEPENDENCIES)
+    # torch 单独安装到 torch_cpu；rotary 安装时不再把 torch 拉进 site-packages。
+    _pip(python_exe, [ROTARY_SPEC], no_deps=True)
+    _prune_pyside6(bundle_dir / "python" / "Lib" / "site-packages")
+    _install_torch(bundle_dir, TORCH_CPU_INDEXES)
+    _smoke_runtime(bundle_dir)
+    pending_marker = marker.with_suffix(".tmp")
+    pending_marker.write_text(fingerprint, encoding="utf-8")
+    pending_marker.replace(marker)
 
 
 # ---------- 打包链一致性校验 ----------
@@ -414,10 +484,13 @@ def _check_packaging_consistency() -> None:
 def prepare_bundle(bundle_dir: Path) -> None:
     """组装打包源：app 快照 + python(绿色 Python+依赖) + torch_cpu + models。
 
-    python/torch_cpu/models 下载安装产物跨次构建复用（大文件避免重下）。
+    python/torch_cpu 仅在规格标记匹配且冒烟成功后复用；模型独立校验复用。
     单包制：不内置 CUDA torch（省 3.3GB 包体，安装时按需下载）。
     """
+    bundle_dir = bundle_dir.resolve()
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    # _base_dir 根据 models/ + torch_cpu/ 识别安装布局；运行时冒烟前建立该目录。
+    (bundle_dir / "models").mkdir(exist_ok=True)
 
     # 1. 代码快照（每次按最新代码重建）
     for sub in ("app",):
@@ -429,30 +502,8 @@ def prepare_bundle(bundle_dir: Path) -> None:
     count = copy_app_source(ROOT, bundle_dir / "app")
     print(f"[2/5] 代码快照: {bundle_dir / 'app'}（{count} 个文件）")
 
-    # 2. 绿色 Python（存在则复用）
-    python_exe = bundle_dir / "python" / "python.exe"
-    if not python_exe.exists():
-        _download_green_python(bundle_dir)
-    print(f"[2/5] 内置 Python: {python_exe}")
-
-    # 3. 依赖装入绿色 Python（存在关键包则复用）
-    # 判定用 Qt6Widgets.dll（而非 PySide6 目录）：依赖被裁剪/损坏时强制重装
-    need_deps = not (bundle_dir / "python" / "Lib" / "site-packages"
-                     / "PySide6" / "Qt6Widgets.dll").exists()
-    if need_deps:
-        print("[3/5] 安装应用依赖（soundfile/PySide6-Essentials 等）…")
-        _pip(python_exe, DEPENDENCIES)
-        # rotary-embedding-torch 的依赖链会把 CPU torch（约 524MB）装进
-        # site-packages，与 torch_cpu/ 目录重复 → 单独 --no-deps 安装，
-        # torch 由 torch_cpu/torch_cuda 提供（应用启动时切换）
-        _pip(python_exe, ["rotary-embedding-torch>=0.4"], no_deps=True)
-        _prune_pyside6(bundle_dir / "python" / "Lib" / "site-packages")
-        _smoke_ui(python_exe)
-    else:
-        print("[3/5] 应用依赖已就绪，复用")
-
-    # 4. CPU torch（独立目录，应用内切换）
-    _install_torch(bundle_dir, TORCH_CPU_INDEXES)
+    # 2–4. 解释器、应用依赖、CPU torch：完整准备与冒烟后才可复用。
+    _prepare_runtime(bundle_dir)
 
     # 5. 模型权重（SHA256 校验；已就绪则复用）。本地文件名由注册表的
     #    filename 字段决定（safetensors 或 ckpt），不写死扩展名
@@ -488,14 +539,15 @@ def default_iscc() -> Path:
 
 
 def build(iscc: Path, out_dir: Path) -> Path:
-    # 输出路径与 bundle 路径均在 install.iss 内用相对路径配置
-    # （相对脚本文件所在目录），避免 ISCC 对含空格路径参数的解析问题；
-    # 只传无空格的版本号。半在线单包约 283MB（Inno 6+ 支持 >2GB 安装包）。
+    # 每个选项独立传给 subprocess，由列表参数保留含空格路径，不能手工加引号。
+    out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     _check_packaging_consistency()
     cmd = [
         str(iscc),
         f"/DMyAppVersion={__version__}",
+        f"/DBundleDir={out_dir / '_bundle'}",
+        f"/O{out_dir}",
         str(ROOT / "installer" / "install.iss"),
     ]
     print("[5/5] ISCC 编译中（压缩需较长时间）…")

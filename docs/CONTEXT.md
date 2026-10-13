@@ -8,13 +8,13 @@
 
 | 术语 | 定义 |
 |---|---|
-| **分离（separate）** | 将一段混合音频拆成两条音轨：人声（vocals）与伴奏（instrumental）。伴奏 = 原曲 − 人声（数学无损）。 |
+| **分离（separate）** | 将一段混合音频拆成两条音轨：人声（vocals）与伴奏（instrumental）。伴奏 = 原曲 − 人声（数学无损）。重复分离整对共用编号，如 `song-2-vocals` / `song-2-instrumental`；任一侧已有文件时该编号不再复用。 |
 | **合成（mix）** | 分离的逆运算：把分离出的人声与伴奏重新合成为整曲。默认精确求和（同源产物可近似无损还原），可选按轨增益与峰值归一化（-1 dBFS）；纯 DSP，不加载模型、不 import torch。进度 phase 为 `decode` / `mix` / `write`，取消抛 `CancelledError` 并清理半成品。 |
 | **配对（stem pairing）** | 按文件名自动识别人声/伴奏并成对：`-vocals` / `_vocals` 对应人声，`-instrumental` / `_instrumental` / `-inst` / `_inst` 对应伴奏（大小写不敏感、扩展名可不同，另兼容空格分隔）。`pair_stems()` 结果分**已配对 / 未配对 / 忽略**三类；同基名多候选只配最早的一对，其余进未配对，不静默挑文件。 |
 | **模型（model）** | 训练好的分离网络权重，当前分发 fp16 safetensors（`*.lite.safetensors`；历史 `.ckpt` 格式仍可加载，engine 按扩展名分流）。`bs_roformer_ep317` 为主力，`mel_band_karaoke` 备选。SHA256 校验，不入 git。 |
 | **引擎（engine）** | `uvr_lite/engine.py` 的分离执行层，提供 `separate_file()` 纯函数接口（输入/输出/参数）。 |
 | **audio_io** | `uvr_lite/audio_io.py`：解码 / 重采样 / 文件扫描的共享层（soundfile + soxr，audioread 兜底 m4a），engine 与 mix 共用且不 import torch；`engine._load_audio` 保留为薄封装兼容旧调用点。 |
-| **进度回调（progress_callback）** | 分离 / 合成向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。 |
+| **进度回调（progress_callback）** | 分离 / 合成向调用方上报进度的钩子：`callback(phase, done, total) -> bool`。返回 `False` 表示请求取消。普通推理子块为 `chunk`，TTA 增强子块为 `tta_chunk`，分别映射进度区间。 |
 | **取消（cancel）** | 用户中止当前任务。分离 / 合成收到回调返回 `False` 后抛 `CancelledError`（`uvr_lite/errors.py` 共享，engine 继续 re-export 兼容旧调用）；UI 清理半成品输出。 |
 | **半成品清理** | 取消后删除未写完的输出文件（`*-vocals.*` / `*-instrumental.*`，合成 `*-mix.*`），不留残缺文件。 |
 | **任务队列（queue）** | UI 中待处理音频的列表。**两种添加方式**：选择文件（多选/拖拽）或选择输入文件夹（扫描其中常见音频格式 mp3/flac/wav/ogg/m4a，默认不递归、去重追加）。拖放与「选择文件夹」共用同一条扫描路径：拖入的每一项按「目录 → 扫顶层音频 / 文件 → 后缀过滤」分流，跨文件夹去重后追加。按添加顺序逐个处理；单文件失败跳过继续，结束汇总"成功 N / 失败 M"。处理开始前先做一次格式预检：无法识别为音频的列表项标 ✗「（格式不支持）」，留在列表中但不进入本次队列；全部都无法识别时不启动任务。 |

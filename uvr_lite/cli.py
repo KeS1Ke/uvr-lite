@@ -79,11 +79,9 @@ def _cmd_mix(args: argparse.Namespace) -> int:
 
 
 def _cmd_download(args: argparse.Namespace) -> int:
-    if args.model == "all":
-        for name in MODEL_REGISTRY:
-            ensure_model(name)
-    else:
-        ensure_model(args.model, force=args.force)
+    names = MODEL_REGISTRY if args.model == "all" else [args.model]
+    for name in names:
+        ensure_model(name, force=args.force)
     return 0
 
 
